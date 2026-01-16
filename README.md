@@ -101,8 +101,8 @@ Infrastructure overhead measured on **NVIDIA RTX 3060 Ti** (1440p Video):
 
 | Metric | Result | Notes |
 | :--- | :--- | :--- |
-| **Pipeline Throughput** | **~300 FPS** | Full I/O (Decode → GPU Memory → NVJpeg Encode) |
-| **I/O Latency** | **~3.3 ms** | Time spent on non-inference tasks (leaving **13ms+** (at 60FPS) purely for AI models). |
+| **Max Pipeline Capacity** | **~300 FPS (No Model)** | Measured with Stub/Pass-through Detector. Represents the I/O ceiling (Decode → GPU Memory → Encode) before adding model latency |
+| **I/O Latency** | **~3.3 ms** | Time spent on non-inference tasks, leaving **13ms+** (at 60FPS) purely for AI models. |
 | **CPU Usage** | **Low** | Zero-Host-Copy ensures CPU only handles orchestration, not pixels. |
 
 ## ⚖️ License
