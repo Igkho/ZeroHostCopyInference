@@ -1,0 +1,12 @@
+{
+  "name": "zerocopy-engine",
+  "version": "1.0.0",
+  "dependencies": [
+    {
+      "name": "ffmpeg",
+      "features": ["nvcodec", "avcodec", "avformat", "avutil", "swscale"]
+    },
+    "onnxruntime-gpu",
+    "cudart"
+  ]
+}
