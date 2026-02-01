@@ -5,7 +5,8 @@
 #include <iostream>
 #include <fstream>
 #include <filesystem>
-//#include <cuda_runtime.h>
+#include <sstream>
+#include <iomanip>
 #include "DetectionRaw.h"
 
 namespace fs = std::filesystem;
@@ -21,7 +22,7 @@ CudaError NVJpegSink::Init() {
     CUDA_TRY(CudaStream::Create(cuda_stream_, cudaStreamNonBlocking));
 
     // Initialize Tracker
-    CUDA_TRY(ObjectTracker::Create(tracker_, 2048));
+    CUDA_TRY(ObjectTracker::Create(tracker_, modelProps_.numClasses, *cuda_stream_));
 
     // Init nvJPEG
     CUDA_TRY(nvjpegCreateSimple(&nvjpeg_handle_));
@@ -34,19 +35,15 @@ CudaError NVJpegSink::Init() {
     CUDA_TRY(nvjpegEncoderParamsCreate(nvjpeg_handle_, &encode_params_, *cuda_stream_));
     CUDA_TRY(nvjpegEncoderParamsSetSamplingFactors(encode_params_, NVJPEG_CSS_444, *cuda_stream_));
     CUDA_TRY(nvjpegEncoderParamsSetQuality(encode_params_, 90, *cuda_stream_));
-    CUDA_TRY(PrintNVJpegVersion());
+    CUDA_TRY(CheckNVJpegVersion());
     return CudaError();
 }
 
-CudaError NVJpegSink::PrintNVJpegVersion() const {
+CudaError NVJpegSink::CheckNVJpegVersion() const {
 
-    // 1. Get Runtime Version (The DLL/.so actually loaded)
     int rtMajor, rtMinor;
     CUDA_TRY(nvjpegGetProperty(MAJOR_VERSION, &rtMajor));
     CUDA_TRY(nvjpegGetProperty(MINOR_VERSION, &rtMinor));
-
-    // 2. Get Compile-Time Version (The headers it's built with)
-    // defined in nvjpeg.h as macros
     int cMajor = NVJPEG_VER_MAJOR;
     int cMinor = NVJPEG_VER_MINOR;
     int cPatch = NVJPEG_VER_PATCH;
@@ -66,11 +63,9 @@ CudaError NVJpegSink::PrintNVJpegVersion() const {
 }
 
 NVJpegSink::~NVJpegSink() {
-    // FIX: Using CUDA_CALL_NO_THROW ensures errors are logged but exceptions aren't thrown
     if (encode_params_) {
         CUDA_CALL_NO_THROW(nvjpegEncoderParamsDestroy(encode_params_));
     }
-
     for (auto& state : encoder_states_) {
         if (state) {
             CUDA_CALL_NO_THROW(nvjpegEncoderStateDestroy(state));
@@ -82,9 +77,7 @@ NVJpegSink::~NVJpegSink() {
 }
 
 CudaError NVJpegSink::Save(const BatchData& data, const BatchDetections& results) {
-    // Sync logic: Wait for upstream events
     if (data.readyEvent) {
-        // *cuda_stream_ converts to cudaStream_t via operator()
         CUDA_TRY(cudaStreamWaitEvent(*cuda_stream_, *data.readyEvent, 0));
     }
     if (results.readyEvent) {
@@ -92,11 +85,11 @@ CudaError NVJpegSink::Save(const BatchData& data, const BatchDetections& results
     }
 
     // Pointers for tracking
-    auto* detPtr = const_cast<DetectionRaw*>(reinterpret_cast<const DetectionRaw*>(results.data.data()));
+//    auto* detPtr = const_cast<DetectionRaw*>(reinterpret_cast<const DetectionRaw*>(results.data.data()));
+    auto* detPtr = const_cast<DetectionRaw*>(results.data.data());
     int* countPtr = const_cast<int*>(results.counts.data());
 
-    // Capacity of the detection buffer (must match Detector allocation logic)
-    int maxDetsCapacity = 10000;
+    int stride = BatchDetections::MAX_DETECTIONS_PER_FRAME;
 
     // Run Tracking (Sequential per frame in batch)
     for (int i = 0; i < data.batchSize; ++i) {
@@ -104,14 +97,25 @@ CudaError NVJpegSink::Save(const BatchData& data, const BatchDetections& results
             i,
             detPtr,
             countPtr,
-            maxDetsCapacity,
+            stride,
+            (int)data.width,
+            (int)data.height,
             *cuda_stream_
             ));
     }
 
+    CUDA_TRY(tracker_->Compact(*cuda_stream_));
+
     // Run Annotation
     float* imgPtr = const_cast<float*>(data.deviceData.data());
-
+//    std::cout << "Detection counts size: " << results.counts.size() << std::endl;
+//    std::vector<int> host_counts;
+//    CUDA_TRY(results.counts.to_vector(host_counts,*cuda_stream_));
+//    std::cout << "Detection counts: ";
+//    for (int i = 0; i < host_counts.size(); ++i) {
+//        std::cout << host_counts[i] << " " ;
+//    }
+//    std::cout << std::endl;
     CUDA_TRY(tracker_->Annotate(
         imgPtr,
         data.batchSize,
@@ -126,11 +130,11 @@ CudaError NVJpegSink::Save(const BatchData& data, const BatchDetections& results
     size_t totalElements = framePixels * channels * data.batchSize;
 
     // Resize buffer (Automatic growth, no-op if large enough)
-    CUDA_TRY(buffer_block_.resize(totalElements));
+    CUDA_TRY(buffer_block_.resize(totalElements, *cuda_stream_));
 
     // Convert Float->Uint8 (Kernel)
-    // FloatToUint8 returns CudaError, so we use CUDA_TRY
-    CUDA_TRY(FloatToUint8(data.deviceData.data(), buffer_block_.data(), totalElements));
+    CUDA_TRY(FloatToUint8(data.deviceData.data(), buffer_block_.data(),
+                          totalElements, *cuda_stream_));
 
     // Encode
     for (int i = 0; i < data.batchSize; ++i) {
@@ -158,13 +162,10 @@ CudaError NVJpegSink::Save(const BatchData& data, const BatchDetections& results
     }
 
     CUDA_TRY(cudaStreamSynchronize(*cuda_stream_));
-
     size_t totalBytes = std::accumulate(lengths.begin(), lengths.end(), 0);
 
     if (totalBytes > 0) {
-        // Resize Pinned Buffer
-        CUDA_TRY(pinned_buffer_.resize(totalBytes));
-
+        CUDA_TRY(pinned_buffer_.resize(totalBytes, *cuda_stream_));
         uint8_t* currentHostPtr = pinned_buffer_.data();
         std::vector<uint8_t*> framePointers;
 
@@ -178,21 +179,7 @@ CudaError NVJpegSink::Save(const BatchData& data, const BatchDetections& results
         CUDA_TRY(cudaStreamSynchronize(*cuda_stream_));
 
         // File writing (Standard C++ I/O)
-        // for (int i = 0; i < data.batchSize; ++i) {
-        //     std::string id = (i < data.sourceIdentifiers.size()) ?
-        //                          data.sourceIdentifiers[i] :
-        //                          std::to_string(data.batchId * data.batchSize + i);
-        //     std::string filename = "frame_" + id + ".jpg";
-        //     fs::path filePath = fs::path(output_path_) / filename;
-        //     std::ofstream outFile(filePath, std::ios::out | std::ios::binary);
-        //     if (outFile) {
-        //         outFile.write(reinterpret_cast<const char*>(framePointers[i]), lengths[i]);
-        //     }
-        // }
-
-        // File writing (Standard C++ I/O)
         for (int i = 0; i < data.batchSize; ++i) {
-            // FIX: Check for !empty() to ensure we fallback to numeric ID if the string is just initialized
             std::string id;
             if (i < data.sourceIdentifiers.size() && !data.sourceIdentifiers[i].empty()) {
                 id = data.sourceIdentifiers[i];
@@ -201,7 +188,10 @@ CudaError NVJpegSink::Save(const BatchData& data, const BatchDetections& results
                 id = std::to_string(data.batchId * data.batchSize + i);
             }
 
-            std::string filename = "frame_" + id + ".jpg";
+            std::stringstream ss;
+            ss << "frame_" << std::setw(4) << std::setfill('0') << id << ".jpg";
+            std::string filename = ss.str();
+
             fs::path filePath = fs::path(output_path_) / filename;
             std::ofstream outFile(filePath, std::ios::out | std::ios::binary);
             if (outFile) {

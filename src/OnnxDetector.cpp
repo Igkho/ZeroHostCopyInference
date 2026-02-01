@@ -90,18 +90,19 @@ CudaError OnnxDetector::Init(const std::string& modelPath) {
     pool_.resize(POOL_SIZE);
 
     size_t rawVol = BatchData::MAX_BATCH_SIZE * channels * anchors;
-    size_t finalVol = BatchData::MAX_BATCH_SIZE * BatchDetections::MAX_DETECTIONS_PER_FRAME * sizeof(DetectionRaw);
+//    size_t finalVol = BatchData::MAX_BATCH_SIZE * BatchDetections::MAX_DETECTIONS_PER_FRAME * sizeof(DetectionRaw);
     int maxCandidates = BatchDetections::MAX_DETECTIONS_PER_FRAME * 10;
 
     for (auto& res : pool_) {
 //        std::cout << "Reserving floats: " << rawVol << std::endl;
-        CUDA_TRY(res.rawOutput.reserve(rawVol));
-        CUDA_TRY(res.candidates.reserve(maxCandidates * sizeof(DetectionRaw)));
-        CUDA_TRY(res.candidateCount.reserve(1));
+        CUDA_TRY(res.rawOutput.reserve(rawVol, *cuda_stream_));
+//        CUDA_TRY(res.candidates.reserve(maxCandidates * sizeof(DetectionRaw), *cuda_stream_));
+        CUDA_TRY(res.candidates.reserve(maxCandidates, *cuda_stream_));
+        CUDA_TRY(res.candidateCount.reserve(1, *cuda_stream_));
 
         // Ensure result structure is ready
-        CUDA_TRY(res.result.data.reserve(finalVol));
-        CUDA_TRY(res.result.counts.reserve(BatchData::MAX_BATCH_SIZE));
+//        CUDA_TRY(res.result.data.reserve(finalVol));
+//        CUDA_TRY(res.result.counts.reserve(BatchData::MAX_BATCH_SIZE));
 
         // Zero out counts safely
         CUDA_TRY(cudaMemsetAsync(res.candidateCount.data(), 0, sizeof(int), *cuda_stream_));
@@ -148,21 +149,35 @@ CudaError OnnxDetector::Detect(const BatchData& input, BatchDetections &output) 
         return CudaError(ERROR_SOURCE, std::string("ONNX Output Info Error: ") + e.what());
     }
 
+    int batchSize = input.batchSize;
+
     // Resize Buffers (Efficient Reuse)
-    CUDA_TRY(res.rawOutput.resize(input.batchSize * channels * anchors));
-    CUDA_TRY(res.candidates.resize(BatchDetections::MAX_DETECTIONS_PER_FRAME * 10 * sizeof(DetectionRaw)));
-    CUDA_TRY(res.candidateCount.resize(1));
-    CUDA_TRY(res.result.data.resize(input.batchSize * BatchDetections::MAX_DETECTIONS_PER_FRAME * sizeof(DetectionRaw)));
-    CUDA_TRY(res.result.counts.resize(input.batchSize));
+    CUDA_TRY(res.rawOutput.resize(batchSize * channels * anchors, *cuda_stream_));
+//    CUDA_TRY(cudaMemsetAsync(res.rawOutput.data(), 0, res.rawOutput.byte_size(), *cuda_stream_));
+
+    CUDA_TRY(res.candidates.resize(BatchDetections::MAX_DETECTIONS_PER_FRAME * 10, // * sizeof(DetectionRaw),
+                                   *cuda_stream_));
+//    CUDA_TRY(cudaMemsetAsync(res.candidates.data(), 0, res.candidates.byte_size(), *cuda_stream_));
+
+    CUDA_TRY(res.candidateCount.resize(1, *cuda_stream_));
+    CUDA_TRY(cudaMemsetAsync(res.candidateCount.data(), 0, res.candidateCount.byte_size(), *cuda_stream_));
+
+    // CUDA_TRY(res.result.data.resize(atchSize * BatchDetections::MAX_DETECTIONS_PER_FRAME * sizeof(DetectionRaw)));
+    // CUDA_TRY(res.result.counts.resize(batchSize));
+    CUDA_TRY(output.data.resize(batchSize * BatchDetections::MAX_DETECTIONS_PER_FRAME, *cuda_stream_));
+//    CUDA_TRY(cudaMemsetAsync(output.data.data(), 0, output.data.byte_size(), *cuda_stream_));
+
+    CUDA_TRY(output.counts.resize(batchSize, *cuda_stream_));
+    CUDA_TRY(cudaMemsetAsync(output.counts.data(), 0, output.counts.byte_size(), *cuda_stream_));
 
     // Ensure Events exist
-    if (!res.result.readyEvent) {
-        CUDA_TRY(CudaEvent::Create(res.result.readyEvent));
+    if (!output.readyEvent) {
+        CUDA_TRY(CudaEvent::Create(output.readyEvent));
     }
 
     // Setup Input Shape [Batch, 3, H, W]
     std::vector<int64_t> inputShape = {
-        (int64_t)input.batchSize, 3, (int64_t)input.height, (int64_t)input.width
+        (int64_t)batchSize, 3, (int64_t)input.height, (int64_t)input.width
     };
 
     // Create Memory Info (Tells ORT the data is on GPU ID 0)
@@ -183,7 +198,7 @@ CudaError OnnxDetector::Detect(const BatchData& input, BatchDetections &output) 
 
     // Setup Output Binding
     std::vector<int64_t> outputShape = {
-        (int64_t)input.batchSize, (int64_t)channels, (int64_t)anchors
+        (int64_t)batchSize, (int64_t)channels, (int64_t)anchors
     };
 
     Ort::Value outputTensor = Ort::Value::CreateTensor<float>(
@@ -210,28 +225,30 @@ CudaError OnnxDetector::Detect(const BatchData& input, BatchDetections &output) 
         res.candidates.data(),
         res.candidates.size(),
         res.candidateCount.data(),
-        input.batchSize,
+        batchSize,
         anchors,
         channels - 4,
-        0.25f,
+        0.25f, // Confidence Threshold
         *cuda_stream_
     ));
 
     // NMS (Kernel)
-    CUDA_TRY(RunNMS_GPU(
+    CUDA_TRY(RunNMS(
         res.candidates.data(),
         res.candidates.size(),
         res.candidateCount.data(),
-        res.result.data.data(),
-        res.result.data.size(),
-        res.result.counts.data(),
+        output.data.data(),
+        output.data.size(),
+        output.counts.data(),
         res.nmsMask,
-        0.45f,
+        0.45f, // IOU threshold
+        BatchDetections::MAX_DETECTIONS_PER_FRAME, // Stride
+        batchSize,
         *cuda_stream_
     ));
 
     // Record Event
-    CUDA_TRY(cudaEventRecord(*res.result.readyEvent, *cuda_stream_));
+    CUDA_TRY(cudaEventRecord(*output.readyEvent, *cuda_stream_));
 
     // Cleanup Bindings
     ioBinding_->ClearBoundInputs();
@@ -240,7 +257,7 @@ CudaError OnnxDetector::Detect(const BatchData& input, BatchDetections &output) 
     // Swap Results (Efficient Memory Exchange)
     // 'output' gets the new data.
     // 'res.result' gets 'output's old buffer (reclaiming it for the pool).
-    std::swap(output, res.result);
+//    std::swap(output, res.result);
 
     return CudaError();
 }

@@ -62,44 +62,43 @@ CudaError TrtDetector::Init(const std::string& modelPath) {
 
     size_t rawVol = BatchData::MAX_BATCH_SIZE * channels * anchors;
     size_t maxCandidates = BatchData::MAX_BATCH_SIZE * BatchDetections::MAX_DETECTIONS_PER_FRAME * 10;
-    size_t finalVol = BatchData::MAX_BATCH_SIZE * BatchDetections::MAX_DETECTIONS_PER_FRAME * sizeof(DetectionRaw);
+//    size_t finalVol = BatchData::MAX_BATCH_SIZE * BatchDetections::MAX_DETECTIONS_PER_FRAME * sizeof(DetectionRaw);
 
     for (auto& res : pool_) {
-        // Use CUDA_TRY with Block methods
-        CUDA_TRY(res.rawOutput.reserve(rawVol));
-        CUDA_TRY(res.candidates.reserve(maxCandidates * sizeof(DetectionRaw)));
-        CUDA_TRY(res.candidateCount.reserve(1));
+        CUDA_TRY(res.rawOutput.reserve(rawVol, *cuda_stream_));
+        // CUDA_TRY(res.candidates.reserve(maxCandidates * sizeof(DetectionRaw), *cuda_stream_));
+        CUDA_TRY(res.candidates.reserve(maxCandidates, *cuda_stream_));
+        CUDA_TRY(res.candidateCount.reserve(1, *cuda_stream_));
 
-        CUDA_TRY(res.result.data.reserve(finalVol));
-        CUDA_TRY(res.result.counts.reserve(BatchData::MAX_BATCH_SIZE));
+//        CUDA_TRY(res.result.data.reserve(finalVol));
+//        CUDA_TRY(res.result.counts.reserve(BatchData::MAX_BATCH_SIZE));
 
         // Ensure event exists
-        if (!res.result.readyEvent) {
-            CUDA_TRY(CudaEvent::Create(res.result.readyEvent));
-        }
+//        if (!res.result.readyEvent) {
+//            CUDA_TRY(CudaEvent::Create(res.result.readyEvent));
+//        }
 
         CUDA_TRY(cudaMemsetAsync(res.candidateCount.data(), 0, sizeof(int), *cuda_stream_));
     }
     CUDA_TRY(cudaStreamSynchronize(*cuda_stream_));
-    std::cout << "[TRT] Memory pool initialized with depth " << POOL_SIZE << std::endl;
     return CudaError();
 }
 
-std::pair<size_t, size_t> TrtDetector::GetInputSize() const {
+// std::pair<size_t, size_t> TrtDetector::GetInputSize() const {
 
-    // Standard NCHW: 0:Batch, 1:Channel, 2:Height, 3:Width
-    if (inputDims_.nbDims >= 4) {
-        size_t h = static_cast<size_t>(inputDims_.d[2]);
-        size_t w = static_cast<size_t>(inputDims_.d[3]);
+//     // Standard NCHW: 0:Batch, 1:Channel, 2:Height, 3:Width
+//     if (inputDims_.nbDims >= 4) {
+//         size_t h = static_cast<size_t>(inputDims_.d[2]);
+//         size_t w = static_cast<size_t>(inputDims_.d[3]);
 
-        // Handle Dynamic Shapes (Dimension is -1)
-        if (h == (size_t)-1) h = 1024;
-        if (w == (size_t)-1) w = 1024;
+//         // Handle Dynamic Shapes (Dimension is -1)
+//         if (h == (size_t)-1) h = 1024;
+//         if (w == (size_t)-1) w = 1024;
 
-        return {w, h};
-    }
-    return {1024, 1024}; // Fallback for unexpected shapes
-}
+//         return {w, h};
+//     }
+//     return {1024, 1024}; // Fallback for unexpected shapes
+// }
 
 CudaError TrtDetector::LoadEngine(const std::string& enginePath) {
 
@@ -157,10 +156,16 @@ CudaError TrtDetector::BuildEngine(const std::string& onnxPath, const std::strin
         return CudaError(ERROR_SOURCE, "Failed to parse ONNX file: " + onnxPath);
     }
 
-    // if (builder->platformHasFastFp16()) {
-    //     config->setFlag(nvinfer1::BuilderFlag::kFP16);
-    //     std::cout << "[TRT] FP16 Precision Enabled." << std::endl;
-    // }
+    // [UPDATE] Robust FP16 Enablement
+    // We assume CC 7.0+ (Hardware FP16 support exists).
+    // We surround the flag with pragmas to suppress TRT 10+ deprecation warnings.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    // kFP16 is deprecated in TRT 10 but required to enable FP16 tactics
+    // without implementing full Strong Typing.
+    config->setFlag(nvinfer1::BuilderFlag::kFP16);
+#pragma GCC diagnostic pop
+    std::cout << "[TRT] FP16 Precision Enabled." << std::endl;
 
     auto profile = builder->createOptimizationProfile();
     bool hasDynamic = false;
@@ -268,17 +273,25 @@ CudaError TrtDetector::Detect(const BatchData& input, BatchDetections &output) {
     int anchors = outputDims_.d[2];  // 8400
 
     // 2. Resize Buffers (Efficient Reuse)
-    CUDA_TRY(res.rawOutput.resize(batchSize * channels * anchors));
-    size_t requiredCandidates = batchSize * BatchDetections::MAX_DETECTIONS_PER_FRAME * 10;
-    CUDA_TRY(res.candidates.resize(requiredCandidates * sizeof(DetectionRaw)));
-    CUDA_TRY(res.candidateCount.resize(1));
+    CUDA_TRY(res.rawOutput.resize(batchSize * channels * anchors, *cuda_stream_));
+    size_t candSize = BatchDetections::MAX_DETECTIONS_PER_FRAME * 10; // * sizeof(DetectionRaw);
+    CUDA_TRY(res.candidates.resize(candSize, *cuda_stream_));
+    CUDA_TRY(cudaMemsetAsync(res.candidates.data(), 0, res.candidates.byte_size(), *cuda_stream_));
+
+    CUDA_TRY(res.candidateCount.resize(1, *cuda_stream_));
+    CUDA_TRY(cudaMemsetAsync(res.candidateCount.data(), 0, sizeof(int), *cuda_stream_));
 
     // Resize Output Structure
-    CUDA_TRY(res.result.data.resize(batchSize * BatchDetections::MAX_DETECTIONS_PER_FRAME * sizeof(DetectionRaw)));
-    CUDA_TRY(res.result.counts.resize(batchSize));
+    size_t resultSize = batchSize * BatchDetections::MAX_DETECTIONS_PER_FRAME; // * sizeof(DetectionRaw);
+    CUDA_TRY(output.data.resize(resultSize, *cuda_stream_));
+//    CUDA_TRY(cudaMemsetAsync(output.data.data(), 0, resultSize, *cuda_stream_));
+    CUDA_TRY(cudaMemsetAsync(output.data.data(), 0, output.data.byte_size(), *cuda_stream_));
 
-    if (!res.result.readyEvent) {
-        CUDA_TRY(CudaEvent::Create(res.result.readyEvent));
+    CUDA_TRY(output.counts.resize(batchSize, *cuda_stream_));
+    CUDA_TRY(cudaMemsetAsync(output.counts.data(), 0, output.counts.byte_size(), *cuda_stream_));
+
+    if (!output.readyEvent) {
+        CUDA_TRY(CudaEvent::Create(output.readyEvent));
     }
 
     // Inference
@@ -306,26 +319,28 @@ CudaError TrtDetector::Detect(const BatchData& input, BatchDetections &output) {
         batchSize,
         anchors,
         channels - 4,
-        0.25f, // Confidence Threshold
+        0.2f, // Confidence Threshold
         *cuda_stream_));
 
     // NMS (Kernel)
-    CUDA_TRY(RunNMS_GPU(
+    CUDA_TRY(RunNMS(
         res.candidates.data(),
         res.candidates.size(),
         res.candidateCount.data(),
-        res.result.data.data(),
-        res.result.data.size(),
-        res.result.counts.data(),
+        output.data.data(),
+        output.data.size(),
+        output.counts.data(),
         res.nmsMask,
-        0.45f,
+        0.45f, // IOU threshold
+        BatchDetections::MAX_DETECTIONS_PER_FRAME, // Stride
+        batchSize,
         *cuda_stream_));
 
     // Finalize
-    CUDA_TRY(cudaEventRecord(*res.result.readyEvent, *cuda_stream_));
+    CUDA_TRY(cudaEventRecord(*output.readyEvent, *cuda_stream_));
 
     // Swap results (Zero copy ownership transfer)
-    std::swap(output, res.result);
+    // std::swap(output, res.result);
 
     return CudaError();
 }

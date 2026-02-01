@@ -319,4 +319,96 @@ TEST_F(BlockTest, AssignSelf) {
     EXPECT_EQ(out, data);
 }
 
+// --- 7. Async Stream Operations ---
+
+TEST_F(BlockTest, AsyncCreateAndFill) {
+    // 1. Setup Stream
+    std::unique_ptr<CudaStream> streamPtr;
+    ASSERT_CUDA_SUCCESS(CudaStream::Create(streamPtr));
+    cudaStream_t stream = *streamPtr;
+
+    // 2. Async Creation
+    std::unique_ptr<Block<int>> block;
+    // Create size 100, fill with 77, on specific stream
+    ASSERT_CUDA_SUCCESS(Block<int>::Create(block, 100, 77, stream));
+
+    // 3. Verify
+    std::vector<int> out;
+    // to_vector syncs internally, ensuring we wait for the async fill
+    ASSERT_CUDA_SUCCESS(block->to_vector(out, stream));
+
+    ASSERT_EQ(out.size(), 100);
+    for (int v : out) {
+        EXPECT_EQ(v, 77);
+    }
+}
+
+TEST_F(BlockTest, AsyncResizePreservesData) {
+    // This tests the critical path: Malloc -> Async Copy Old -> Async Memset New -> Swap
+    std::unique_ptr<CudaStream> streamPtr;
+    ASSERT_CUDA_SUCCESS(CudaStream::Create(streamPtr));
+    cudaStream_t stream = *streamPtr;
+
+    std::vector<int> initial_data = {10, 20, 30};
+    std::unique_ptr<Block<int>> block;
+    ASSERT_CUDA_SUCCESS(Block<int>::Create(block, initial_data, stream));
+
+    // Resize to 10, fill new slots with 99
+    ASSERT_CUDA_SUCCESS(block->resize(10, 99, stream));
+
+    std::vector<int> out;
+    ASSERT_CUDA_SUCCESS(block->to_vector(out, stream));
+
+    EXPECT_EQ(out.size(), 10);
+    // Check old data preserved
+    EXPECT_EQ(out[0], 10);
+    EXPECT_EQ(out[1], 20);
+    EXPECT_EQ(out[2], 30);
+    // Check new data filled
+    for (size_t i = 3; i < 10; ++i) {
+        EXPECT_EQ(out[i], 99);
+    }
+}
+
+TEST_F(BlockTest, AsyncBlockToBlockCopy) {
+    std::unique_ptr<CudaStream> streamPtr;
+    ASSERT_CUDA_SUCCESS(CudaStream::Create(streamPtr));
+    cudaStream_t stream = *streamPtr;
+
+    std::vector<float> data(1000, 123.456f);
+    std::unique_ptr<Block<float>> src;
+    std::unique_ptr<Block<float>> dst;
+
+    ASSERT_CUDA_SUCCESS(Block<float>::Create(src, data, stream));
+    ASSERT_CUDA_SUCCESS(Block<float>::Create(dst, 0, stream)); // Empty dst
+
+    // Async assignment between device blocks
+    ASSERT_CUDA_SUCCESS(dst->assign(*src, stream));
+
+    std::vector<float> out;
+    ASSERT_CUDA_SUCCESS(dst->to_vector(out, stream));
+
+    EXPECT_EQ(out, data);
+}
+
+TEST_F(BlockTest, AsyncPinnedMemoryCompatibility) {
+    // Pinned memory often falls back to synchronous CPU memset/memcpy.
+    // We must ensure passing a stream doesn't break compilation or runtime logic.
+    std::unique_ptr<CudaStream> streamPtr;
+    ASSERT_CUDA_SUCCESS(CudaStream::Create(streamPtr));
+    cudaStream_t stream = *streamPtr;
+
+    std::unique_ptr<Block<uint8_t, MemoryType::Pinned>> block;
+    ASSERT_CUDA_SUCCESS((Block<uint8_t, MemoryType::Pinned>::Create(block, 50, stream)));
+
+    // Resize with value on stream
+    ASSERT_CUDA_SUCCESS(block->resize(100, 0xAA, stream));
+
+    std::vector<uint8_t> out;
+    ASSERT_CUDA_SUCCESS(block->to_vector(out, stream));
+
+    EXPECT_EQ(out.size(), 100);
+    EXPECT_EQ(out[99], 0xAA);
+}
+
 } // namespace cropandweed

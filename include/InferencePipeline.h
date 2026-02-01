@@ -21,7 +21,7 @@ public:
     ~InferencePipeline();
 
     /**
-     * Starts the processing loop. 
+     * Starts the processing loop.
      * This function blocks the calling thread until the Source runs out of data.
      */
     CudaError Run();
@@ -41,6 +41,8 @@ private:
     SafeQueue<std::pair<BatchData, BatchDetections>> postProcessQueue_;
     // Recycling queue to prevent GPU malloc/free every frame
     SafeQueue<BatchData> recycleQueue_;
+    // Recycling queue for Detections
+    SafeQueue<BatchDetections> resultRecycleQueue_;
 
     // Threading
     std::vector<std::thread> workers_;
@@ -49,6 +51,9 @@ private:
 
     // Performance Tracking
     PipelineStats stats_;
+
+    // Atomic counter to track items currently being processed across all threads
+    std::atomic<int> batchesInFlight_{0};
 
     // Internal worker functions
     void inferenceWorker();

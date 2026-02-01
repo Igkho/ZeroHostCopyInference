@@ -39,6 +39,10 @@ struct TestContext {
 class MockSource : public ISource {
 public:
     explicit MockSource(std::shared_ptr<TestContext> ctx) : ctx_(ctx) {}
+    // explicit MockSource(std::shared_ptr<TestContext> ctx, size_t width, size_t height) : ctx_(ctx) {
+    //     ctx_->width = (int)width;
+    //     ctx_->height = (int)height;
+    // }
 
     CudaError GetNextBatch(BatchData& outBatch, size_t batchSize, bool &process) override {
         // Simulate decoding latency (critical for recycling test)
@@ -87,11 +91,6 @@ public:
         return CudaError();
     }
 
-    void SetOutputSize(size_t width, size_t height) override {
-        ctx_->width = (int)width;
-        ctx_->height = (int)height;
-    }
-
 private:
     std::shared_ptr<TestContext> ctx_;
 };
@@ -119,8 +118,8 @@ public:
         return CudaError();
     }
 
-    std::pair<size_t, size_t> GetInputSize() const override {
-        return { (size_t)ctx_->width, (size_t)ctx_->height };
+    ModelProperties GetModelProperties() const override {
+        return { (size_t)ctx_->width, (size_t)ctx_->height, 3, {"", "", ""} };
     }
 
 private:

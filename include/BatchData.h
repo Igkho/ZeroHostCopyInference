@@ -23,13 +23,13 @@ struct BatchData {
     std::unique_ptr<CudaEvent> readyEvent;
 
     // --- Unified Initialization ---
-    CudaError Init(size_t bSize, size_t w, size_t h) {
+    CudaError Init(size_t bSize, size_t w, size_t h, cudaStream_t stream = 0) {
         batchSize = bSize;
         width = w;
         height = h;
 
         // One resize call, error propagates automatically
-        CUDA_TRY(deviceData.resize(batchSize * width * height * 3)); // Assuming 3 channels (RGB/Planar)
+        CUDA_TRY(deviceData.resize(batchSize * width * height * 3, stream)); // Assuming 3 channels (RGB/Planar)
 
         // Init Event
         CUDA_TRY(CudaEvent::Create(readyEvent, cudaStreamNonBlocking));
@@ -41,10 +41,11 @@ struct BatchData {
     }
 
     // --- Static Factory ---
-    static CudaError Create(std::shared_ptr<BatchData>& out, int id, size_t bSize, size_t w, size_t h) {
+    static CudaError Create(std::shared_ptr<BatchData>& out, int id,
+                            size_t bSize, size_t w, size_t h, cudaStream_t stream = 0) {
         auto res = std::make_shared<BatchData>();
         res->batchId = id;
-        CUDA_TRY(res->Init(bSize, w, h));
+        CUDA_TRY(res->Init(bSize, w, h, stream));
         out = std::move(res);
         return CudaError();
     }

@@ -9,18 +9,24 @@
 
 namespace cropandweed {
 
+struct ModelProperties {
+    size_t inputWidth = 0;
+    size_t inputHeight = 0;
+    int numClasses = 0;
+    std::vector<std::string> classNames;
+};
+
 class ISource {
 public:
     virtual ~ISource() = default;
     virtual CudaError GetNextBatch(BatchData& outBatch, size_t batchSize, bool &process) = 0;
-    virtual void SetOutputSize(size_t width, size_t height) = 0;
 };
 
 class IDetector {
 public:
     virtual ~IDetector() = default;
     virtual CudaError Detect(const BatchData& input, BatchDetections &output) = 0;
-    virtual std::pair<size_t, size_t> GetInputSize() const = 0;
+    virtual ModelProperties GetModelProperties() const = 0;
 };
 
 class ISink {

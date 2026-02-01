@@ -48,27 +48,27 @@ public:
     // --- 2. Factory Methods ---
 
     //! Factory method. Creates a new block of size elements length (memory is not initialized).
-    static CudaError Create(std::unique_ptr<Block<T, MemType>>& out, size_t size);
+    static CudaError Create(std::unique_ptr<Block<T, MemType>>& out, size_t size, cudaStream_t stream = 0);
 
     //! Factory method. Creates a new block of size elements length and fills all bytes of memory with val.
-    static CudaError Create(std::unique_ptr<Block<T, MemType>>& out, size_t size, int val);
+    static CudaError Create(std::unique_ptr<Block<T, MemType>>& out, size_t size, int val, cudaStream_t stream = 0);
 
     //! Factory method. Creates a new block from the host vector.
-    static CudaError Create(std::unique_ptr<Block<T, MemType>>& out, const std::vector<T>& data);
+    static CudaError Create(std::unique_ptr<Block<T, MemType>>& out, const std::vector<T>& data, cudaStream_t stream = 0);
 
     // --- 3. Data Transfer (Resizes + Copies) ---
 
     //! Replaces the data of the block with the host vector data.
     //! Discards previous content, resizing if necessary.
-    CudaError assign(const std::vector<T> &other);
+    CudaError assign(const std::vector<T> &other, cudaStream_t stream = 0);
 
     //! Replaces the data of the block with another block's data.
     //! Discards previous content, resizing if necessary.
-    CudaError assign(const Block<T, MemType> &other);
+    CudaError assign(const Block<T, MemType> &other, cudaStream_t stream = 0);
 
     //! Copies the contents of the block into the provided host vector.
     //! Resizes the output vector to match the block size.
-    CudaError to_vector(std::vector<T> &out) const;
+    CudaError to_vector(std::vector<T> &out, cudaStream_t stream = 0) const;
 
     // --- 4. Modifiers ---
 
@@ -76,18 +76,18 @@ public:
     //! without requiring reallocation) to a value that's greater or equal to new_cap.
     //! If new_cap is greater than the current capacity(), new storage is allocated,
     //! otherwise the function does nothing. reserve() does not change the size of the block.
-    CudaError reserve(size_t new_cap);
+    CudaError reserve(size_t new_cap, cudaStream_t stream = 0);
 
     //! Resizes the block to contain count elements, does nothing if new_size == size().
     //! If the current size is greater than new_size, the block is reduced to its first new_size elements.
     //! If the current size is less than new_size, then additional not initialized elements are appended
-    CudaError resize(size_t new_size);
+    CudaError resize(size_t new_size, cudaStream_t stream = 0);
 
     //! Resizes the block to contain count elements, does nothing if new_size == size().
     //! If the current size is greater than new_size, the block is reduced to its first new_size elements.
     //! If the current size is less than new_size, then additional elements are appended.
     //! Every byte of memory for the appended elements is filled with val
-    CudaError resize(size_t new_size, int val);
+    CudaError resize(size_t new_size, int val, cudaStream_t stream = 0);
 
     //! Erases all elements from the container. After this call, size() returns zero.
     //! Leaves the capacity() of the block unchanged
@@ -155,15 +155,84 @@ private:
 
     //! If possible (allocated memory is enough) copies the data from other to this block.
     //! No memory allocations are made. Assumes capacity is sufficient.
-    CudaError copy_from(const Block<T, MemType> &other);
+    CudaError copy_from(const Block<T, MemType> &other, cudaStream_t stream);
 
     //! If possible (allocated memory is enough) copies the data from other host vector to this block.
     //! No memory allocations are made. Assumes capacity is sufficient.
-    CudaError copy_from(const std::vector<T> &other);
+    CudaError copy_from(const std::vector<T> &other, cudaStream_t stream);
 
     //! If possible (the size of a host vector is enough) copies the data from this block to other host vector.
     //! No memory allocations are made. Assumes output vector is already resized.
-    CudaError copy_to(std::vector<T> &other) const;
+    CudaError copy_to(std::vector<T> &other, cudaStream_t stream) const;
+};
+
+// Header-only adapter for type safety without template instantiation
+template <typename T>
+class TypedBlock {
+private:
+    Block<uint8_t> raw_; // Underlying storage
+
+public:
+    TypedBlock() = default;
+    ~TypedBlock() = default;
+
+    // Move Semantics
+    TypedBlock(TypedBlock&& other) noexcept : raw_(std::move(other.raw_)) {}
+    TypedBlock& operator=(TypedBlock&& other) noexcept {
+        raw_ = std::move(other.raw_);
+        return *this;
+    }
+
+    // No Copy
+    TypedBlock(const TypedBlock&) = delete;
+    TypedBlock& operator=(const TypedBlock&) = delete;
+
+    // Type-Safe Resize (Count based, not Byte based)
+    CudaError resize(size_t count, cudaStream_t stream = 0) {
+        return raw_.resize(count * sizeof(T), stream);
+    }
+
+    // Type-Safe Reserve
+    CudaError reserve(size_t count, cudaStream_t stream = 0) {
+        return raw_.reserve(count * sizeof(T), stream);
+    }
+
+    // Assign from host vector
+    CudaError assign(const std::vector<T>& other, cudaStream_t stream = 0) {
+        size_t totalBytes = other.size() * sizeof(T);
+        CUDA_TRY(raw_.resize(totalBytes, stream));
+        if (totalBytes > 0) {
+            // Reinterpret cast logic handled implicitly by void* in memcpy
+            CUDA_TRY(cudaMemcpyAsync(raw_.data(), other.data(),
+                                     totalBytes, cudaMemcpyHostToDevice, stream));
+        }
+        return CudaError();
+    }
+
+    // Copy to host vector
+    CudaError to_vector(std::vector<T>& out, cudaStream_t stream = 0) const {
+        size_t count = size();
+        out.resize(count);
+        if (count > 0) {
+            size_t totalBytes = count * sizeof(T);
+            CUDA_TRY(cudaMemcpyAsync(out.data(), raw_.data(),
+                                     totalBytes, cudaMemcpyDeviceToHost, stream));
+            // Synchronize to ensure vector is ready for CPU use
+            CUDA_TRY(cudaStreamSynchronize(stream));
+        }
+        return CudaError();
+    }
+
+    // Accessors
+    T* data() noexcept { return reinterpret_cast<T*>(raw_.data()); }
+    const T* data() const noexcept { return reinterpret_cast<const T*>(raw_.data()); }
+
+    size_t size() const { return raw_.size() / sizeof(T); }
+    size_t byte_size() const { return raw_.byte_size(); }
+    size_t capacity() const { return raw_.capacity() / sizeof(T); }
+
+    // For specialized cases needing the raw byte block
+    Block<uint8_t>& raw() { return raw_; }
 };
 
 } // namespace cropandweed

@@ -3,7 +3,6 @@
 #include "Block.h"
 #include "ObjectTrackerKernels.h"
 #include <memory>
-//#include <type_traits> // for is_shared_ptr_v logic in helpers.h
 
 namespace cropandweed {
 
@@ -21,26 +20,26 @@ public:
      * @brief Factory method to create and initialize an ObjectTracker.
      * Handles memory allocation and error propagation.
      */
-    template <typename SmartPtr>
-    static CudaError Create(SmartPtr& out, int maxTracks = 2000) {
-        if constexpr (is_shared_ptr_v<SmartPtr>) {
-            auto ptr = std::make_shared<ObjectTracker>(Token{});
-            CUDA_TRY(ptr->Init(maxTracks));
-            out = std::move(ptr);
-        } else {
-            auto ptr = std::make_unique<ObjectTracker>(Token{});
-            CUDA_TRY(ptr->Init(maxTracks));
-            out = std::move(ptr);
-        }
+    static CudaError Create(std::unique_ptr<ObjectTracker>& out,
+                            int numClasses,
+                            cudaStream_t stream,
+                            int maxTracks = TRACKER_MAX_TRACKS) {
+        auto ptr = std::make_unique<ObjectTracker>(Token{});
+        CUDA_TRY(ptr->Init(maxTracks, numClasses, stream));
+        out = std::move(ptr);
         return CudaError();
     }
 
     // Updates state based on detections
-    CudaError ProcessBatch(int batchIndex, 
-                           DetectionRaw* detections, 
-                           int* countBuffer, 
+    CudaError ProcessBatch(int batchIndex,
+                           DetectionRaw* detections,
+                           int* countBuffer,
                            int maxDetections,
+                           int width,
+                           int height,
                            cudaStream_t stream);
+
+    CudaError Compact(cudaStream_t stream);
 
     // Draws the current state (boxes + IDs) onto the image
     CudaError Annotate(float* imageBatch, 
@@ -53,14 +52,16 @@ public:
 
 private:
     // Initialization is now internal to the Factory
-    CudaError Init(int maxTracks);
+    CudaError Init(int maxTracks, int numClasses, cudaStream_t stream);
 
-    Block<uint8_t> tracks_;
+    TypedBlock<TrackState> tracks_;
+//    Block<uint8_t> tracks_;
     Block<int> trackCount_;
     Block<int> nextTrackId_;
     Block<int> detectionMatches_; 
 
     int maxTracks_ = 0;
+    int numClasses_ = 0;
 };
 
 } // namespace cropandweed

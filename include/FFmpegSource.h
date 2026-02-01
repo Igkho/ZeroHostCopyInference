@@ -20,28 +20,24 @@ private:
     struct Token {};
 public:
 
-    FFmpegSource(Token, std::string uri): uri_(std::move(uri)) {};
+    FFmpegSource(Token, std::string uri, int width, int height):
+        uri_(std::move(uri)), targetW_(width), targetH_(height) {}
 
     ~FFmpegSource() override;
 
     // --- Strict Factory Method ---
-    static CudaError Create(std::unique_ptr<ISource>& out, std::string uri) {
-        auto ptr = std::make_unique<FFmpegSource>(Token{}, uri);
+    static CudaError Create(std::unique_ptr<ISource>& out, std::string uri, int width, int height) {
+        auto ptr = std::make_unique<FFmpegSource>(Token{}, uri, width, height);
         CUDA_TRY(ptr->Init());
-        // Implicit move-conversion from unique_ptr<FFmpegSource> to unique_ptr<ISource>
         out = std::move(ptr);
         return CudaError();
     }
 
     CudaError GetNextBatch(BatchData& outBatch, size_t batchSize, bool &process) override;
-    void SetOutputSize(size_t width, size_t height) override;
 
 private:
     CudaError Init();
     void Cleanup();
-
-    // DEBUG: Saves the GPU buffer to disk as PPM
-//    CudaError SaveDebugPPM(float* gpuRGB, int w, int h, int frameId);
 
     std::string uri_;
     size_t frameCounter_ = 0;

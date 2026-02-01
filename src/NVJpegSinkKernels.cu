@@ -24,12 +24,14 @@ __global__ void FloatToUint8Kernel(const float* __restrict__ src,
 
 CudaError FloatToUint8(const float* src,
                          uint8_t* dst,
-                         int totalElements) {
+                         int totalElements,
+                         cudaStream_t stream
+                       ) {
     if (src == nullptr || dst == nullptr || totalElements <= 0) {
         return CudaError(ERROR_SOURCE, "FloatToUint8 invalid input: Null pointer or zero size");
     }
     KernelGrid grid(totalElements);
-    FloatToUint8Kernel<<<grid.gsize(), grid.bsize()>>>(src, dst, totalElements);
+    FloatToUint8Kernel<<<grid.gsize(), grid.bsize(), 0, stream>>>(src, dst, totalElements);
     return CudaError(ERROR_SOURCE, cudaGetLastError());
 }
 

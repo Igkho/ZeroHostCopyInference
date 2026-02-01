@@ -66,6 +66,9 @@ CudaError InferencePipeline::Run() {
             stats_.totalBatches++;
             stats_.totalFrames = stats_.totalFrames + (int)batch.batchSize;
 
+            // Increment in-flight counter before pushing to pipeline
+            batchesInFlight_++;
+
             // Push valid batch to processing
             preProcessQueue_.Push(std::move(batch));
         }
@@ -73,7 +76,8 @@ CudaError InferencePipeline::Run() {
 
     // Shutdown Sequence
     // Wait for queues to drain
-    while (running_ && (!preProcessQueue_.Empty() || !postProcessQueue_.Empty())) {
+//    while (running_ && (!preProcessQueue_.Empty() || !postProcessQueue_.Empty())) {
+    while (running_ && (batchesInFlight_ > 0)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
@@ -95,6 +99,8 @@ void InferencePipeline::inferenceWorker() {
     while (running_) {
         BatchData batch;
         BatchDetections results;
+        if (resultRecycleQueue_.TryPop(results, std::chrono::milliseconds(0))) {
+        }
         // Wait up to 100ms for data
         if (preProcessQueue_.TryPop(batch, std::chrono::milliseconds(100))) {
             try {
@@ -132,10 +138,12 @@ void InferencePipeline::outputWorker() {
                 // Log but don't necessarily kill the pipeline for one bad frame save
                 std::cerr << "Pipeline Sink Error: " << e.what() << std::endl;
             }
-
-            // CRITICAL: We must recycle the input buffer even if Save() failed,
-            // otherwise that memory is lost and we will eventually OOM or stop recycling.
+            // Recycle Input
             recycleQueue_.Push(std::move(item.first));
+            // Recycle the result buffer
+            resultRecycleQueue_.Push(std::move(item.second));
+            // Decrement in-flight counter: The item has left the pipeline
+            --batchesInFlight_;
         }
     }
 }

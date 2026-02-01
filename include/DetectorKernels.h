@@ -14,46 +14,35 @@ struct Detection {
     std::string label;
 };
 
-    CudaError DecodeAndFilter(const float* d_output,
-//                                Block<uint8_t>& candidateBuffer,
-                                uint8_t *candidateBuffer,
-                                int candidateBufferSize,
-//                                Block<int>& countBuffer,
-                                int *countBuffer,
-                                int batchSize,
-                                int numAnchors,
-                                int numClasses,
-                                float confThreshold,
-                                cudaStream_t stream = 0);
+// Decodes raw CNN output into candidate structures
+CudaError DecodeAndFilter(const float* d_output,
+                          DetectionRaw *candidateBuffer,
+                          int candidateBufferSize,
+                          int *countBuffer,
+                          int batchSize,
+                          int numAnchors,
+                          int numClasses,
+                          float confThreshold,
+                          cudaStream_t stream = 0);
 
-CudaError RunNMS_GPU(uint8_t *candidateBuffer,
-                     int candidateBufferSize,
-                     int *countBuffer,
-                     uint8_t *finalOutputBuffer,
-                     int finalOutputBufferSize,
-                     int *finalOutputCount,
-                     Block<uint8_t> &maskBuffer,
-                     float nmsThreshold,
-                     cudaStream_t stream = 0);
+// Runs NMS and Unpacks results into strided buffer [Batch0][Batch1]...
+CudaError RunNMS(DetectionRaw *candidateBuffer,
+                 int candidateBufferSize,
+                 int *candidateCountBuffer,
+                 DetectionRaw *finalOutputBuffer,
+                 int finalOutputBufferSize,
+                 int *finalOutputCount,
+                 Block<uint8_t> &maskBuffer,
+                 float nmsThreshold,
+                 int maxOutputPerBatch,       // The stride (MAX_DETECTIONS_PER_FRAME)
+                 int batchSize,
+                 cudaStream_t stream = 0);
 
-                         // Block<uint8_t>& finalOutputBuffer,
-                         //   Block<int>& finalOutputCount,
-                         //   Block<uint8_t> &maskBuffer,
-                         //   float nmsThreshold,
-                         //   cudaStream_t stream = 0);
 
-    std::vector<std::vector<Detection>> RunNMS_CPU(uint8_t *candidateBuffer,
-                                                   int candidateBufferSize,
-                                                   int *countBuffer,
-                                                   int batchSize,
-                                                   float nmsThreshold);
-
-/*
-    std::vector<std::vector<Detection>> ConvertGpuResultsToVector(
-        Block<uint8_t>& gpuData,
-        Block<int>& gpuCount,
-        int batchSize);
-};
-*/
+std::vector<std::vector<Detection>> RunNMS_CPU(uint8_t *candidateBuffer,
+                                               int candidateBufferSize,
+                                               int *countBuffer,
+                                               int batchSize,
+                                               float nmsThreshold);
 
 }

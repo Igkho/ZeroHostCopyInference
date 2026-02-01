@@ -4,7 +4,7 @@
 #include <memory>
 #include <vector>
 #include "Block.h"
-#include "FrameResourses.h"
+#include "FrameResources.h"
 
 namespace cropandweed {
 
@@ -22,22 +22,21 @@ public:
     ~OnnxDetector() override {}
 
     // --- Factory Method ---
-    template <typename SmartPtr>
-    static CudaError Create(SmartPtr& out, std::string modelPath) {
-        // Use if constexpr to detect shared_ptr vs unique_ptr
-        if constexpr (is_shared_ptr<SmartPtr>::value) {
-            // Optimization: Single allocation for Control Block + Object
-            auto ptr = std::make_shared<OnnxDetector>(Token{});
-            CUDA_TRY(ptr->Init(modelPath));
-            out = std::move(ptr);
-        }
-        else {
-            // Default: unique_ptr
-            auto ptr = std::make_unique<OnnxDetector>(Token{});
-            CUDA_TRY(ptr->Init(modelPath));
-            out = std::move(ptr);
-        }
+    static CudaError Create(std::unique_ptr<IDetector>& out, const std::string &modelPath) {
+        auto ptr = std::make_unique<OnnxDetector>(Token{});
+        CUDA_TRY(ptr->Init(modelPath));
+        out = std::move(ptr);
         return CudaError();
+    }
+
+    ModelProperties GetModelProperties() const override {
+        ModelProperties props;
+        props.inputWidth = inputW_;
+        props.inputHeight = inputH_;
+        // Logic to derive classes from output tensor shape (calculated in Init)
+        // For YOLO: Channels (84) - 4 = 80 classes
+        props.numClasses = 80; // Ideally strictly calculated from outputShape in Init()
+        return props;
     }
 
     // Main Interface

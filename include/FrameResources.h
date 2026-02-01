@@ -9,11 +9,13 @@ namespace cropandweed {
 struct FrameResources {
     // Direct fields: Metadata (size, ptr) lives inside FrameResources memory
     Block<float> rawOutput;
-    Block<uint8_t> candidates;
+//    Block<uint8_t> candidates;
+    TypedBlock<DetectionRaw> candidates;
+
     Block<int> candidateCount;
     
     // Even nested structs can hold direct Blocks
-    BatchDetections result;
+//    BatchDetections result;
 
     Block<uint8_t> nmsMask;
     
@@ -25,15 +27,15 @@ struct FrameResources {
     FrameResources() = default;
 
     // Unified Initialization
-    CudaError Init(int width, int height) {
+    CudaError Init(int width, int height, cudaStream_t stream = 0) {
         // Resize direct blocks. Returns error on OOM.
-        CUDA_TRY(rawOutput.resize(width * height));
-        CUDA_TRY(candidates.resize(1000));
-        CUDA_TRY(candidateCount.resize(1));
+        CUDA_TRY(rawOutput.resize(width * height, stream));
+        CUDA_TRY(candidates.resize(1000, stream));
+        CUDA_TRY(candidateCount.resize(1, stream));
         
         // Init nested items
-        CUDA_TRY(result.data.resize(500));
-        CUDA_TRY(nmsMask.resize(1));
+        // CUDA_TRY(result.data.resize(500));
+        CUDA_TRY(nmsMask.resize(1, stream));
 
         // Init Event
         CUDA_TRY(CudaEvent::Create(readyEvent, cudaStreamNonBlocking));
@@ -42,12 +44,12 @@ struct FrameResources {
     }
 
     // Static Factory for the whole bundle
-    static CudaError Create(std::shared_ptr<FrameResources>& out, int w, int h) {
+    static CudaError Create(std::shared_ptr<FrameResources>& out, int w, int h, cudaStream_t stream = 0) {
         // 1. Single Allocation (using make_shared for efficiency)
         auto res = std::make_shared<FrameResources>();
 
         // 2. Error Propagating Init
-        CUDA_TRY(res->Init(w, h));
+        CUDA_TRY(res->Init(w, h, stream));
 
         // 3. Success
         out = std::move(res);

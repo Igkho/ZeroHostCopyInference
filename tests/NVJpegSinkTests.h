@@ -92,7 +92,8 @@ TEST_F(NVJpegSinkTest, KernelFloatToUint8Conversion) {
 TEST_F(NVJpegSinkTest, CreateAndInit) {
     std::unique_ptr<ISink> sink;
     // Factory should create the directory if it doesn't exist
-    ASSERT_CUDA_SUCCESS(NVJpegSink::Create(sink, output_dir_.string()));
+    ASSERT_CUDA_SUCCESS(NVJpegSink::Create(sink, output_dir_.string(),
+                                           {1024, 1024, 3, {"", "", ""}}));
     
     ASSERT_NE(sink, nullptr);
     EXPECT_TRUE(fs::exists(output_dir_));
@@ -104,14 +105,16 @@ TEST_F(NVJpegSinkTest, CreateAndInit) {
 // ==========================================
 
 TEST_F(NVJpegSinkTest, SaveBatchToJpeg) {
+    size_t w = 64;
+    size_t h = 64;
+
     // 1. Setup Sink
     std::unique_ptr<ISink> sink;
-    ASSERT_CUDA_SUCCESS(NVJpegSink::Create(sink, output_dir_.string()));
+    ASSERT_CUDA_SUCCESS(NVJpegSink::Create(sink, output_dir_.string(),
+                                           {w, h, 3, {"", "", ""}}));
 
     // 2. Prepare Batch Data (2 images, 64x64)
     int batchSize = 2;
-    int w = 64;
-    int h = 64;
     
     std::shared_ptr<BatchData> data;
     ASSERT_CUDA_SUCCESS(BatchData::Create(data, 0, batchSize, w, h));
@@ -167,12 +170,13 @@ TEST_F(NVJpegSinkTest, SaveBatchToJpeg) {
 }
 
 TEST_F(NVJpegSinkTest, HandleLargeImages) {
+    size_t w = 1920;
+    size_t h = 1080;
     // Verify memory allocation handling for larger resolutions
     std::unique_ptr<ISink> sink;
-    ASSERT_CUDA_SUCCESS(NVJpegSink::Create(sink, output_dir_.string()));
+    ASSERT_CUDA_SUCCESS(NVJpegSink::Create(sink, output_dir_.string(),
+                                           {w, h, 3, {"", "", ""}}));
 
-    int w = 1920;
-    int h = 1080;
     std::shared_ptr<BatchData> data;
     ASSERT_CUDA_SUCCESS(BatchData::Create(data, 1, 1, w, h));
     
@@ -191,8 +195,8 @@ TEST_F(NVJpegSinkTest, HandleLargeImages) {
 
     // Check output
     // If IDs are missing, default naming is used: frame_{ID}.jpg
-    // BatchId=1, Index=0 -> frame_1.jpg (since 1 * 1 + 0 = 1)
-    fs::path file = output_dir_ / "frame_1.jpg"; 
+    // BatchId=1, Index=0 -> frame_0001.jpg (since 1 * 1 + 0 = 1)
+    fs::path file = output_dir_ / "frame_0001.jpg";
     EXPECT_TRUE(fs::exists(file));
 }
 

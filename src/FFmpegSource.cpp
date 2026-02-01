@@ -107,10 +107,10 @@ CudaError FFmpegSource::Init() {
     return CudaError();
 }
 
-void FFmpegSource::SetOutputSize(size_t width, size_t height) {
-    targetW_ = width;
-    targetH_ = height;
-}
+// void FFmpegSource::SetOutputSize(size_t width, size_t height) {
+//     targetW_ = width;
+//     targetH_ = height;
+// }
 
 CudaError FFmpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, bool &process) {
     if (finished_ && !flushing_) {
@@ -129,7 +129,7 @@ CudaError FFmpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, bool
 
     size_t totalFloats = (outW * outH * 3) * batchSize;
 
-    CUDA_TRY(outBatch.deviceData.resize(totalFloats));
+    CUDA_TRY(outBatch.deviceData.resize(totalFloats, *cuda_stream_));
 
     int framesCollected = 0;
 
@@ -160,6 +160,8 @@ CudaError FFmpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, bool
                                          false,
                                          *cuda_stream_
                                          ));
+
+                CUDA_TRY(cudaStreamSynchronize(*cuda_stream_));
 
                 outBatch.sourceIdentifiers.push_back(std::to_string(frameCounter_++));
                 framesCollected++;

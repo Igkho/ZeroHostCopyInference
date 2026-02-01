@@ -12,18 +12,25 @@
 #include "Interfaces.h"
 #include "NVJpegSink.h"
 #include "PerformanceTimer.h"
-#include "DetectionRaw.h"
+#include "BatchData.h"
 #include "StubDetector.h"
 #include "OnnxDetector.h"
 #include "TrtDetector.h"
+#include "ClassNamesReader.h"
 
 
 using namespace cropandweed;
 
+enum class BackendType {
+    TRT,
+    ONNX,
+    STUB,
+};
+
 constexpr const char* TOOL_VERSION = "1.0.0";
 
 int main(int argc, char** argv) {
-    CLI::App app{"CropAndWeed Inference Tool"};
+    CLI::App app{"ZeroHostCopy Inference Tool"};
 
     app.set_version_flag("--version", std::string(TOOL_VERSION));
 
@@ -38,16 +45,24 @@ int main(int argc, char** argv) {
         ->check(CLI::ExistingFile);
 
     std::string outputPath;
-    app.add_option("-o,--output", outputPath, "Path to output folder") // Changed desc to 'folder'
+    app.add_option("-o,--output", outputPath, "Path to output folder")
         ->required();
 
-    std::string backend = "stub"; // Default changed to stub for testing
-    app.add_option("--backend", backend, "Inference backend engine")
-        ->check(CLI::IsMember({"onnx", "trt", "stub"}, CLI::ignore_case))->default_val("stub");
+    std::string classesPath;
+    app.add_option("-c,--classes", classesPath, "Class names file")->check(CLI::ExistingFile);
 
-    int batchSize = 4;
-    app.add_option("-b,--batch-size", batchSize, "Inference batch size")
-        ->default_val(4)->check(CLI::Range(1, (int)BatchData::MAX_BATCH_SIZE));
+    BackendType backend = BackendType::TRT;
+    std::map<std::string, BackendType> backendMap{
+        {"trt",  BackendType::TRT},
+        {"onnx", BackendType::ONNX},
+        {"stub", BackendType::STUB},
+    };
+    app.add_option("--backend", backend, "Inference backend engine: trt, onnx, stub")
+        ->transform(CLI::CheckedTransformer(backendMap, CLI::ignore_case));
+
+    int batchSize = 16;
+    app.add_option("-b,--batch", batchSize, "Inference batch size")
+        ->default_val(16)->check(CLI::Range(1, (int)BatchData::MAX_BATCH_SIZE));
 
     try {
         app.parse(argc, argv);
@@ -55,40 +70,71 @@ int main(int argc, char** argv) {
         return app.exit(e);
     }
 
-    std::cout << "Starting CropAndWeed Inference Tool v" << TOOL_VERSION << std::endl;
+    std::cout << "Starting ZeroHostCopy Inference Tool v" << TOOL_VERSION << std::endl;
 
     try {
         // Measure initialization time
         PerformanceTimer initTimer("Initialization");
         
-        // Create Source
-        std::unique_ptr<ISource> source;
-        CUDA_CALL(FFmpegSource::Create(source, videoPath))
-
         // Create Detector based on Backend Flag
         std::unique_ptr<IDetector> detector;
 
-        if (backend == "stub") {
-            std::cout << "[Main] Selected Backend: Stub (Pass-through)" << std::endl;
-            CUDA_CALL(StubDetector::Create(detector));
-        }
-        else if (backend == "trt") {
-            if (modelPath.empty()) throw std::runtime_error("TensorRT backend requires --model argument");
-            std::cout << "[Main] Selected Backend: TensorRT" << std::endl;
-            CUDA_CALL(TrtDetector::Create(detector, modelPath));
-        } else {
-            if (modelPath.empty()) throw std::runtime_error("ONNX backend requires --model argument");
-            std::cout << "[Main] Selected Backend: ONNX Runtime" << std::endl;
-            CUDA_CALL(OnnxDetector::Create(detector, modelPath));
+        switch (backend) {
+            case BackendType::STUB:
+                std::cout << "[Main] Selected Backend: Stub (Pass-through)" << std::endl;
+                CUDA_CALL(StubDetector::Create(detector));
+                break;
+
+            case BackendType::TRT:
+                if (modelPath.empty()) {
+                    throw std::runtime_error("TensorRT backend requires --model argument");
+                }
+                std::cout << "[Main] Selected Backend: TensorRT" << std::endl;
+                CUDA_CALL(TrtDetector::Create(detector, modelPath));
+                break;
+
+            case BackendType::ONNX:
+                if (modelPath.empty()) {
+                    throw std::runtime_error("ONNX backend requires --model argument");
+                }
+                std::cout << "[Main] Selected Backend: ONNX Runtime" << std::endl;
+                CUDA_CALL(OnnxDetector::Create(detector, modelPath));
+                break;
+
+            default:
+                throw std::runtime_error("Invalid Backend Type");
         }
 
-        const auto [reqW, reqH] = detector->GetInputSize();
-        std::cout << "[Main] Model requires input: " << reqW << "x" << reqH << std::endl;
-        source->SetOutputSize(reqW, reqH);
+        // Extract Properties
+        ModelProperties props = detector->GetModelProperties();
+
+        // Load Class Names from file if provided, otherwise generate generic
+        if (!classesPath.empty()) {
+            std::cout << "[Main] Loading classes from " << classesPath << "..." << std::endl;
+            auto nameMap = ClassNamesReader::Read(classesPath);
+
+            // Convert to vector for the Sink
+            props.classNames = ClassNamesReader::ToVector(nameMap);
+
+            // Validate count match
+            if (props.numClasses != props.classNames.size()) {
+                std::cerr << "[Warning] Model predicts " << props.numClasses
+                          << " classes, but file provided " << props.classNames.size() << std::endl;
+            }
+        } else {
+            // Generate generic names "Class 0", "Class 1"...
+            for(int i=0; i<props.numClasses; ++i) {
+                props.classNames.push_back("Class " + std::to_string(i));
+            }
+        }
+
+        // Create Source
+        std::unique_ptr<ISource> source;
+        CUDA_CALL(FFmpegSource::Create(source, videoPath, props.inputWidth, props.inputHeight))
 
         // Create Sink
         std::unique_ptr<ISink> sink;
-        CUDA_CALL(NVJpegSink::Create(sink, outputPath));
+        CUDA_CALL(NVJpegSink::Create(sink, outputPath, props));
 
         // Create and Run Pipeline
         InferencePipeline pipeline(
@@ -100,7 +146,6 @@ int main(int argc, char** argv) {
 
         // Stop init timer manually to get the value for the report
         long long initMs = initTimer.Stop();
-        std::cout << "[PERFORMANCE] Initialization completed in " << initMs << " ms" << std::endl;
 
         //Run
         CUDA_CALL(pipeline.Run());

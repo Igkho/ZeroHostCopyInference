@@ -14,24 +14,34 @@ CudaError StubDetector::Init() {
     // Pre-allocate memory for the pool to ensure zero-allocation during runtime.
     // We assume a max batch size of 8 for pre-allocation purposes.
     int maxBatch = 8;
-    size_t totalBytes = maxBatch * BatchDetections::MAX_DETECTIONS_PER_FRAME * sizeof(DetectionRaw);
+    // size_t totalBytes = maxBatch * BatchDetections::MAX_DETECTIONS_PER_FRAME; // * sizeof(DetectionRaw);
+    size_t totalElements = maxBatch * BatchDetections::MAX_DETECTIONS_PER_FRAME; // * sizeof(DetectionRaw);
 
     for (auto& bd : pool_) {
         // Initialize the BatchDetections struct (creates readyEvent)
-        CUDA_TRY(bd.Init(maxBatch));
+        CUDA_TRY(bd.Init(maxBatch, *cuda_stream_));
 
         // Reserve maximum capacity so resize() calls in Detect() don't trigger malloc
-        CUDA_TRY(bd.data.reserve(totalBytes));
-        CUDA_TRY(bd.counts.reserve(maxBatch));
+        CUDA_TRY(bd.data.reserve(totalElements, *cuda_stream_));
+        CUDA_TRY(bd.counts.reserve(maxBatch, *cuda_stream_));
     }
 
     std::cout << "[StubDetector] Initialized with pool size " << POOL_SIZE << std::endl;
     return CudaError();
 }
 
-std::pair<size_t, size_t> StubDetector::GetInputSize() const {
-    // Stub accepts any size, but we return a standard resolution
-    return {1024, 1024};
+ModelProperties StubDetector::GetModelProperties() const {
+    ModelProperties props;
+
+    // Simulate a standard high-res model
+    props.inputWidth = 1024;
+    props.inputHeight = 1024;
+
+    // Simulate standard COCO dataset (80 classes)
+    // This ensures the Sink allocates valid resources (colors/fonts)
+    props.numClasses = 80;
+
+    return props;
 }
 
 CudaError StubDetector::Detect(const BatchData& input, BatchDetections& output) {
@@ -45,9 +55,10 @@ CudaError StubDetector::Detect(const BatchData& input, BatchDetections& output) 
 
     // 2. Resize Buffers
     // Since we reserved memory in Init, this is a metadata-only change (Zero Allocation)
-    size_t bytesNeeded = input.batchSize * BatchDetections::MAX_DETECTIONS_PER_FRAME * sizeof(DetectionRaw);
-    CUDA_TRY(res.data.resize(bytesNeeded));
-    CUDA_TRY(res.counts.resize(input.batchSize));
+//    size_t bytesNeeded = input.batchSize * BatchDetections::MAX_DETECTIONS_PER_FRAME * sizeof(DetectionRaw);
+    size_t elementsNeeded = input.batchSize * BatchDetections::MAX_DETECTIONS_PER_FRAME;// * sizeof(DetectionRaw);
+    CUDA_TRY(res.data.resize(elementsNeeded, *cuda_stream_));
+    CUDA_TRY(res.counts.resize(input.batchSize, *cuda_stream_));
 
     // Ensure Event exists (in case the swapped-in structure didn't have one)
     if (!res.readyEvent) {
@@ -56,7 +67,7 @@ CudaError StubDetector::Detect(const BatchData& input, BatchDetections& output) 
 
     // 3. "Run" Stub Inference
     // Just zero out the memory to simulate processing and ensure clean state
-    CUDA_TRY(cudaMemsetAsync(res.data.data(), 0, bytesNeeded, *cuda_stream_));
+//    CUDA_TRY(cudaMemsetAsync(res.data.data(), 0, bytesNeeded, *cuda_stream_));
     CUDA_TRY(cudaMemsetAsync(res.counts.data(), 0, input.batchSize * sizeof(int), *cuda_stream_));
 
     // 4. Record Completion

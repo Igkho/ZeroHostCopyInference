@@ -16,20 +16,13 @@ private:
     struct Token {};
 public:
 
-    NVJpegSink(Token, std::string outputPath): output_path_(std::move(outputPath)) {}
+    NVJpegSink(Token, std::string outputPath, ModelProperties props)
+        : output_path_(std::move(outputPath)), modelProps_(std::move(props)) {}
 
-    template <class SmartPtr>
-    static CudaError Create(SmartPtr& out, std::string outputPath) {
-
-        if constexpr (is_shared_ptr_v<SmartPtr>) {
-            auto sink = std::make_shared<NVJpegSink>(Token{}, std::move(outputPath));
-            CUDA_TRY(sink->Init());
-            out = std::move(sink);
-        } else {
-            auto sink = std::unique_ptr<NVJpegSink>(new NVJpegSink(Token{}, std::move(outputPath)));
-            CUDA_TRY(sink->Init());
-            out = std::move(sink);
-        }
+    static CudaError Create(std::unique_ptr<ISink>& out, std::string outputPath, ModelProperties props) {
+        auto sink = std::make_unique<NVJpegSink>(Token{}, std::move(outputPath), std::move(props));
+        CUDA_TRY(sink->Init());
+        out = std::move(sink);
         return CudaError();
     }
 
@@ -38,12 +31,13 @@ public:
     CudaError Save(const BatchData& data, const BatchDetections &results) override;
 
 private:
-    CudaError PrintNVJpegVersion() const;
+    CudaError CheckNVJpegVersion() const;
 
     CudaError Init();
 
     std::string output_path_;
-    
+    ModelProperties modelProps_;
+
     // nvJPEG resources
     nvjpegHandle_t nvjpeg_handle_ = nullptr;
     std::vector<nvjpegEncoderState_t> encoder_states_;

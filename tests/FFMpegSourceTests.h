@@ -64,7 +64,7 @@ protected:
 
 TEST_F(FFmpegSourceTest, HandleInvalidURI) {
     std::unique_ptr<ISource> source;
-    CudaError err = FFmpegSource::Create(source, "invalid_video_file.mp4");
+    CudaError err = FFmpegSource::Create(source, "invalid_video_file.mp4", 1024, 1024);
 
     EXPECT_TRUE(CudaError::IsFailure(err));
     EXPECT_NE(err.Text().find("Could not open input"), std::string::npos);
@@ -74,7 +74,7 @@ TEST_F(FFmpegSourceTest, CreateUniquePtr) {
     if (!video_available_) GTEST_SKIP() << "Moving.mp4 not found.";
 
     std::unique_ptr<ISource> source;
-    ASSERT_CUDA_SUCCESS(FFmpegSource::Create(source, video_path_.string()));
+    ASSERT_CUDA_SUCCESS(FFmpegSource::Create(source, video_path_.string(), 1024, 1024));
     ASSERT_NE(source, nullptr);
 }
 
@@ -82,9 +82,7 @@ TEST_F(FFmpegSourceTest, GetNextBatchBasic) {
     if (!video_available_) GTEST_SKIP() << "Moving.mp4 not found.";
 
     std::unique_ptr<ISource> source;
-    ASSERT_CUDA_SUCCESS(FFmpegSource::Create(source, video_path_.string()));
-
-    source->SetOutputSize(300, 300);
+    ASSERT_CUDA_SUCCESS(FFmpegSource::Create(source, video_path_.string(), 300, 300));
 
     BatchData batch;
     size_t requestSize = 4;
@@ -110,7 +108,7 @@ TEST_F(FFmpegSourceTest, VerifyFrameCountAndEOS) {
     if (!video_available_) GTEST_SKIP() << "Moving.mp4 not found.";
 
     std::unique_ptr<ISource> source;
-    ASSERT_CUDA_SUCCESS(FFmpegSource::Create(source, video_path_.string()));
+    ASSERT_CUDA_SUCCESS(FFmpegSource::Create(source, video_path_.string(), 1024, 1024));
 
     BatchData batch;
     size_t batchSize = 10;
@@ -135,12 +133,10 @@ TEST_F(FFmpegSourceTest, VerifyFrameCountAndEOS) {
 TEST_F(FFmpegSourceTest, VerifyRGBContent) {
     if (!video_available_) GTEST_SKIP() << "Moving.mp4 not found.";
 
-    std::unique_ptr<ISource> source;
-    ASSERT_CUDA_SUCCESS(FFmpegSource::Create(source, video_path_.string()));
-
     int w = 64;
     int h = 64;
-    source->SetOutputSize(w, h);
+    std::unique_ptr<ISource> source;
+    ASSERT_CUDA_SUCCESS(FFmpegSource::Create(source, video_path_.string(), w, h));
 
     BatchData batch;
     bool process = false;

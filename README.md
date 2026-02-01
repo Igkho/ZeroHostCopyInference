@@ -13,7 +13,16 @@
 
 ---
 
-## ⚠️ Current Development Status: Phase 3 (Integration)
+## 🎬 Real-Time Output
+*Processing 1440p Video Stream @ ~118 FPS on RTX 3060 Ti.*
+
+![Crop & Weed Detection Demo](video/Moving_annotated.gif)
+
+---
+
+## ⚠️ Current Development Status: Phase 5 (Porting)
+
+The previous phases **Phase 3 (Integration)** and **Phase 4 (Functional Inference)** completed. The pipeline now supports full end-to-end detection and tracking using TensorRT and ONNX backends with mathematically verified kernels.
 
 **Note for Reviewers:** This repository is currently under active development. The pipeline is being implemented in stages to ensure memory safety and zero-host-copy verification.
 
@@ -23,19 +32,31 @@
 |**Stub Detector** | ✅ **Stable** | Pass-through module, validated for pipeline latency profiling. |
 | **Output / NVJpeg** | ✅ **Stable** | Saves frames from GPU memory to disk as separate *.jpg images. |
 | **Inference Pipeline** | ✅ **Stable** | Connects all the stages together. |
-| **ONNX Detector** | 🛠**Integration** | Implemented with `Ort::MemoryInfo` for Zero-Copy input. |
-| **TensorRT Detector** | 🛠**Integration** | Engine builder & `enqueueV3` implemented; Dynamic shapes supported. |
-| **Object Tracker** | 🚧 **WIP** | Kernels for position prediction & IOU matching. |
-| **Post-Processing** | 🚧 **WIP** | Custom CUDA kernels for YOLOv8 decoding & NMS. |
+| **ONNX Detector** | ✅ **Stable** | Implemented with Zero-Copy input. |
+| **TensorRT Detector** | ✅ **Stable** | Engine builder & `enqueueV3` implemented. |
+| **Object Tracker** | ✅ **Stable** | Kernels for position prediction, IOU matching, velocity filtering. |
+| **Post-Processing** | ✅ **Stable** | Custom CUDA kernels for YOLOv8 output decoding & NMS. |
+| **Windows Port** | 🚧 **WIP** | Adapting CMake & CUDA |
+| **Jetson Port** | 🚧 **WIP** | ARM64 optimization. |
 
 ---
 
 ## Project Overview
 This project implements a high-performance video inference pipeline designed to minimize CPU-GPU bandwidth usage. Unlike standard OpenCV implementations, this pipeline keeps data entirely on the VRAM (Zero-Host-Copy) from decoding to inference.
 
-## How to Build & Test (Current Version)
+## 📥 Model Setup (Required)
 
-The current build verifies the **Decoding, Memory Allocation and Data Saving** stages.
+This repository contains the **Inference Engine** (MIT Licensed). It does **not** include pre-trained model weights.
+
+To reproduce the demo results (Crop & Weed Detection), you must download pre-trained YOLOv8 model separately.
+
+### Download the Model
+The model is hosted in the research repository (AGPL-3.0):
+
+* **Download:** [`best.onnx`](https://github.com/Igkho/CropAndWeedDetection/releases) 
+* **License:** AGPL-3.0 (Derived from Ultralytics YOLOv8)
+
+## How to Build & Test (Current Version)
 
 ## Compatibility
 
@@ -62,10 +83,16 @@ Note: The CMakeLists.txt contains specific logic for vcpkg (Windows) and aarch64
     
 ## Compilation & Run
 
-### Build
+### Build & Run (Native)
 
 ```bash
-mkdir build && cd build
+git clone https://github.com/Igkho/ZeroHostCopyInference.git
+cd ZeroHostCopyInference
+
+mkdir build
+mv ~/Downloads/best.onnx ./build/
+
+cd build
 cmake ..
 make -j$(nproc)
 ```
@@ -73,14 +100,7 @@ make -j$(nproc)
 ### Run pipeline
 
 ```bash
-./ZeroCopyInference -i ../video/Moving.mp4 --backend stub -b 16 -o Moving
-```
-or
-```bash
-docker run --rm --gpus all \
-  -v $(pwd)/video:/app/video \
-  ghcr.io/igkho/zerohostcopyinference:main \
-  -i video/Moving.mp4 --backend stub -b 16 -o video/output
+./ZeroCopyInference -i ../video/Moving.mp4 --backend trt --model best.onnx -b 16 -o Moving
 ```
 
 ### Run tests
@@ -88,8 +108,35 @@ docker run --rm --gpus all \
 ```bash
 ./ZeroCopyInferenceTests
 ```
-or
+
+### Quick Start (Docker)
+No C++ compilation required. Requires NVIDIA Container Toolkit.
+
+### Run pipeline
+
 ```bash
+
+git clone https://github.com/Igkho/ZeroHostCopyInference.git
+cd ZeroHostCopyInference
+
+mkdir models
+mv ~/Downloads/best.onnx ./models/
+
+docker run --rm --gpus all \
+  -v $(pwd)/video:/app/video \
+  -v $(pwd)/models:/app/models \
+  ghcr.io/igkho/zerohostcopyinference:main \
+  -i video/Moving.mp4 \
+  --backend trt \
+  --model /app/models/best.onnx \
+  -b 16 \
+  -o video/output
+```
+
+### Run tests
+
+```bash
+
 docker run --rm --gpus all \
   --entrypoint ./build/ZeroCopyInferenceTests \
   ghcr.io/igkho/zerohostcopyinference:main
@@ -97,20 +144,58 @@ docker run --rm --gpus all \
 
 ## 🚀 Performance Benchmarks
 
-Infrastructure overhead measured on **NVIDIA RTX 3060 Ti** (1440p Video):
+Benchmarks performed on **NVIDIA RTX 3060 Ti**.
+**Input:** 1440p Video Stream.
+**Model:** YOLOv8 Medium (YOLOv8m) @ 1024x1024 Resolution.
+
+### 1. Infrastructure Ceiling (Stub Mode)
+To measure the raw overhead of the pipeline architecture (I/O latency), a pass-through (Stub) detector should be used.
 
 | Metric | Result | Notes |
 | :--- | :--- | :--- |
-| **Max Pipeline Capacity** | **~300 FPS (No Model)** | Measured with Stub/Pass-through Detector. Represents the I/O ceiling (Decode → GPU Memory → Encode) before adding model latency |
-| **I/O Latency** | **~3.3 ms** | Time spent on non-inference tasks, leaving **13ms+** (at 60FPS) purely for AI models. |
-| **CPU Usage** | **Low** | Zero-Host-Copy ensures CPU only handles orchestration, not pixels. |
+| **Throughput** | **~300 FPS** | Maximum theoretical speed without AI model. |
+| **Latency** | **3.3 ms** | Combined Decoding + Memory Management overhead. |
+
+### 2. Real-World Inference (TensorRT FP16 Mode)
+Running **YOLOv8m** (FP16 optimized) with full object tracking and NVJpeg output.
+
+| Metric | Result | Notes |
+| :--- | :--- | :--- |
+| **Total Throughput** | **118.10 FPS** | Wall time (End-to-End). **2x Real-Time**. |
+| **Pipeline Latency** | **~8.5 ms** | Average per frame. |
+| **Bottleneck** | **Decoding** | Inference is so fast (5.5ms) that Video Decoding (7ms) becomes the primary factor. |
+
+**Workload Distribution:**
+* **Decoding:** ~7.07 ms/frame (48% load)
+* **Inference:** ~5.58 ms/frame (38% load)
+* **Storage/IO:** ~1.93 ms/frame (13% load)
+
+### 3. Backend Comparison
+Both **TensorRT** (Highly Optimized) and **ONNX Runtime** (Generic Compatibility) are supported.
+
+**Scenario:** 1024x1024 Input Resolution on RTX 3060 Ti.
+
+| Backend | FPS | Latency (Inf) | Speedup Factor | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| **TensorRT (FP16)** | **118.1 FPS** | **~5.6 ms** | **1.0x (Ref)** | Utilizes Tensor Cores. **Recommended.** |
+| **ONNX Runtime** | **~10.5 FPS** | **~94.8 ms** | **0.08x** | Generic execution. Useful for testing new models. |---
+
 
 ## ⚖️ License
 
 The source code of this project is licensed under the **MIT License**. You are free to use, modify, and distribute this infrastructure code for any purpose, including commercial applications.
 
-### ⚠️ Important Note on Model Licensing
-While the C++ pipeline code is MIT-licensed, the **models** you run on it may have their own restrictive licenses.
+### 🛑 Asset & Model Licensing Exceptions
+
+While the code is MIT-licensed, the **assets and models** used in this repository are subject to different terms. Please review them carefully before redistributing:
+
+#### 1. Video Assets (Non-Commercial Only)
+* **Files:** Content located in the `video/` directory (e.g., `Moving.mp4`, `Moving_annotated.gif`).
+* **Source:** Generated using **KlingAI (Free Tier)**.
+* **Terms:** These assets are provided for **demonstration and educational purposes only**. They are **strictly non-commercial**. You may not use these specific video files in any commercial product or service.
+* **Attribution:** The watermarks on these videos must remain intact as per the platform's Terms of Service.
+
+### 2. Model Licensing
 
 * **Example:** If you use **YOLOv8** (Ultralytics) with this pipeline, be aware that YOLOv8 is licensed under **AGPL-3.0**.
 * **Implication:** Integrating an AGPL-3.0 model may legally require your entire combined application to comply with AGPL-3.0 terms (i.e., open-sourcing your entire project).

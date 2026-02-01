@@ -33,9 +33,9 @@ TEST_F(StubDetectorTest, CreateUniquePtr) {
     ASSERT_NE(detector, nullptr);
     
     // Check metadata
-    auto size = detector->GetInputSize();
-    EXPECT_EQ(size.first, 1024);
-    EXPECT_EQ(size.second, 1024);
+    auto props = detector->GetModelProperties();
+    EXPECT_EQ(props.inputHeight, 1024);
+    EXPECT_EQ(props.inputWidth, 1024);
 }
 
 // --- 2. Detection Flow ---
@@ -61,8 +61,9 @@ TEST_F(StubDetectorTest, BasicDetection) {
     EXPECT_EQ(output.counts.size(), 2);
     
     // Data buffer should handle batchSize * MAX_DETECTIONS * sizeof(DetectionRaw)
-    size_t expectedDataBytes = 2 * BatchDetections::MAX_DETECTIONS_PER_FRAME * sizeof(DetectionRaw);
-    EXPECT_EQ(output.data.size(), expectedDataBytes);
+//    size_t expectedDataBytes = 2 * BatchDetections::MAX_DETECTIONS_PER_FRAME * sizeof(DetectionRaw);
+    size_t expectedDataElements = 2 * BatchDetections::MAX_DETECTIONS_PER_FRAME;// * sizeof(DetectionRaw);
+    EXPECT_EQ(output.data.size(), expectedDataElements);
 
     // Verify Event Synchronization
     // The output should have a valid event recorded.
@@ -127,8 +128,9 @@ TEST_F(StubDetectorTest, HandleLargeBatchReallocation) {
     ASSERT_CUDA_SUCCESS(detector->Detect(*input, output));
 
     EXPECT_EQ(output.counts.size(), 10);
-    size_t expectedDataBytes = 10 * BatchDetections::MAX_DETECTIONS_PER_FRAME * sizeof(DetectionRaw);
-    EXPECT_EQ(output.data.size(), expectedDataBytes);
+//    size_t expectedDataBytes = 10 * BatchDetections::MAX_DETECTIONS_PER_FRAME * sizeof(DetectionRaw);
+    size_t expectedDataElements = 10 * BatchDetections::MAX_DETECTIONS_PER_FRAME;// * sizeof(DetectionRaw);
+    EXPECT_EQ(output.data.size(), expectedDataElements);
 }
 
 TEST_F(StubDetectorTest, InputEventWait) {

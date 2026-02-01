@@ -22,14 +22,14 @@ public:
     static CudaError Create(std::unique_ptr<IDetector>& out) {
         auto ptr = std::make_unique<StubDetector>(Token{});
         CUDA_TRY(ptr->Init());
-        // Implicit move-conversion from unique_ptr<StubDetector> to unique_ptr<IDetector>
         out = std::move(ptr);
         return CudaError();
     }
 
+    ModelProperties GetModelProperties() const override;
+
     // Interface Implementation
     CudaError Detect(const BatchData& input, BatchDetections& output) override;
-    std::pair<size_t, size_t> GetInputSize() const override;
 
 private:
     // Internal Init

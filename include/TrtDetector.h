@@ -4,7 +4,7 @@
 #include <NvOnnxParser.h>
 #include "Interfaces.h"
 #include "Block.h"
-#include "FrameResourses.h"
+#include "FrameResources.h"
 #include "helpers.h"
 
 namespace cropandweed {
@@ -30,24 +30,27 @@ public:
     ~TrtDetector() override;
 
     // --- Factory Method ---
-    template <typename SmartPtr>
-    static CudaError Create(SmartPtr& out, std::string modelPath) {
-        if constexpr (is_shared_ptr<SmartPtr>::value) {
-            auto ptr = std::make_shared<TrtDetector>(Token{});
-            CUDA_TRY(ptr->Init(modelPath));
-            out = std::move(ptr);
-        }
-        else {
-            auto ptr = std::make_unique<TrtDetector>(Token{});
-            CUDA_TRY(ptr->Init(modelPath));
-            out = std::move(ptr);
-        }
+    static CudaError Create(std::unique_ptr<IDetector>& out, const std::string &modelPath) {
+        auto ptr = std::make_unique<TrtDetector>(Token{});
+        CUDA_TRY(ptr->Init(modelPath));
+        out = std::move(ptr);
         return CudaError();
     }
 
-    // Main Interface
+    ModelProperties GetModelProperties() const override {
+        ModelProperties props;
+        props.inputWidth = (inputDims_.d[3] > 0) ? inputDims_.d[3] : 1024;
+        props.inputHeight = (inputDims_.d[2] > 0) ? inputDims_.d[2] : 1024;
+
+        // Assuming YOLO output [Batch, Channels, Anchors]
+        // Channels = 4 (xywh) + NumClasses
+        if (outputDims_.nbDims >= 2) {
+            props.numClasses = outputDims_.d[1] - 4;
+        }
+        return props;
+    }
+
     CudaError Detect(const BatchData& input, BatchDetections &output) override;
-    std::pair<size_t, size_t> GetInputSize() const override;
 
 private:
 
