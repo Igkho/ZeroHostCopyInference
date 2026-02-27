@@ -10,8 +10,9 @@ struct BatchData {
     size_t batchSize = 0;
     size_t width = 0;
     size_t height = 0;
-    static constexpr size_t MAX_BATCH_SIZE = 20;
+    static constexpr size_t MAX_BATCH_SIZE = 16;
     static constexpr size_t OPTIMUM_BATCH_SIZE = 16; // for TRT engine optimization
+    static constexpr size_t MIN_BATCH_SIZE = 4;
 
     // 1. Direct Member: Metadata lives here, GPU data lives in VRAM
     Block<float> deviceData;

@@ -14,7 +14,7 @@
 ---
 
 ## 🎬 Real-Time Output
-*Processing 1440p Video Stream @ ~118 FPS on RTX 3060 Ti.*
+*Processing 1440p Video Stream @ ~165 FPS on RTX 3060 Ti.*
 
 ![Crop & Weed Detection Demo](video/Moving_annotated.gif)
 
@@ -53,7 +53,7 @@ To reproduce the demo results (Crop & Weed Detection), you must download pre-tra
 ### Download the Model
 The model is hosted in the research repository (AGPL-3.0):
 
-* **Download:** [`best.onnx`](https://github.com/Igkho/CropAndWeedDetection/releases) 
+* **Download:** [`best_int8.onnx`](https://github.com/Igkho/CropAndWeedDetection/releases) 
 * **License:** AGPL-3.0 (Derived from Ultralytics YOLOv8)
 
 ## How to Build & Test (Current Version)
@@ -90,7 +90,7 @@ git clone https://github.com/Igkho/ZeroHostCopyInference.git
 cd ZeroHostCopyInference
 
 mkdir build
-mv ~/Downloads/best.onnx ./build/
+mv ~/Downloads/best_int8.onnx ./build/
 
 cd build
 cmake ..
@@ -100,7 +100,7 @@ make -j$(nproc)
 ### Run pipeline
 
 ```bash
-./ZeroCopyInference -i ../video/Moving.mp4 --backend trt --model best.onnx -b 16 -o Moving
+./ZeroCopyInference -i ../video/Moving.mp4 --backend trt --model best_int8.onnx -b 16 -o Moving
 ```
 
 ### Run tests
@@ -120,7 +120,7 @@ git clone https://github.com/Igkho/ZeroHostCopyInference.git
 cd ZeroHostCopyInference
 
 mkdir models
-mv ~/Downloads/best.onnx ./models/
+mv ~/Downloads/best_int8.onnx ./models/
 
 docker run --rm --gpus all \
   -v $(pwd)/video:/app/video \
@@ -128,7 +128,7 @@ docker run --rm --gpus all \
   ghcr.io/igkho/zerohostcopyinference:main \
   -i video/Moving.mp4 \
   --backend trt \
-  --model /app/models/best.onnx \
+  --model /app/models/best_int8.onnx \
   -b 16 \
   -o video/output
 ```
@@ -156,29 +156,30 @@ To measure the raw overhead of the pipeline architecture (I/O latency), a pass-t
 | **Throughput** | **~300 FPS** | Maximum theoretical speed without AI model. |
 | **Latency** | **3.3 ms** | Combined Decoding + Memory Management overhead. |
 
-### 2. Real-World Inference (TensorRT FP16 Mode)
-Running **YOLOv8m** (FP16 optimized) with full object tracking and NVJpeg output.
+### 2. Real-World Inference (TensorRT INT8 Mode)
+Running **YOLOv8m** (Explicitly Quantized INT8) with full object tracking and NVJpeg output.
 
 | Metric | Result | Notes |
 | :--- | :--- | :--- |
-| **Total Throughput** | **118.10 FPS** | Wall time (End-to-End). **2x Real-Time**. |
-| **Pipeline Latency** | **~8.5 ms** | Average per frame. |
-| **Bottleneck** | **Decoding** | Inference is so fast (5.5ms) that Video Decoding (7ms) becomes the primary factor. |
+| **Total Throughput** | **~165 FPS** | Wall time (End-to-End). **>2.5x Real-Time**. |
+| **Bottleneck Shift** | **Decoding** | Inference is now so fast (3.36ms) that Video Decoding (4.83ms) has become the primary bottleneck. |
 
-**Workload Distribution:**
-* **Decoding:** ~7.07 ms/frame (48% load)
-* **Inference:** ~5.58 ms/frame (38% load)
-* **Storage/IO:** ~1.93 ms/frame (13% load)
+**Workload Distribution (Active Work):**
+* **Decoding (Source):** ~4.83 ms/frame (46.91% load)
+* **Inference (Detector):** ~3.36 ms/frame (32.66% load)
+* **Storage (Sink):** ~2.10 ms/frame (20.43% load)
 
-### 3. Backend Comparison
+
+### 3. Backend & Precision Comparison
 Both **TensorRT** (Highly Optimized) and **ONNX Runtime** (Generic Compatibility) are supported.
 
 **Scenario:** 1024x1024 Input Resolution on RTX 3060 Ti.
 
-| Backend | FPS | Latency (Inf) | Speedup Factor | Notes |
+| Backend / Precision | FPS | Latency (Inference) | Speedup Factor | Notes |
 | :--- | :--- | :--- | :--- | :--- |
-| **TensorRT (FP16)** | **118.1 FPS** | **~5.6 ms** | **1.0x (Ref)** | Utilizes Tensor Cores. **Recommended.** |
-| **ONNX Runtime** | **~10.5 FPS** | **~94.8 ms** | **0.08x** | Generic execution. Useful for testing new models. |---
+| **TensorRT (INT8)** | **~164.8** | **~3.36 ms** | **1.4x** | Maximum performance. **Recommended.** |
+| **TensorRT (FP16)** | **~118.1** | **~5.58 ms** | **1.0x (Ref)** | Baseline hardware acceleration. |
+| **ONNX Runtime** | **~10.5** | **~94.8 ms** | **0.08x** | Generic execution. Useful for testing new models. |
 
 
 ## ⚖️ License

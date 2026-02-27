@@ -163,9 +163,10 @@ CudaError TrtDetector::BuildEngine(const std::string& onnxPath, const std::strin
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     // kFP16 is deprecated in TRT 10 but required to enable FP16 tactics
     // without implementing full Strong Typing.
+    config->setFlag(nvinfer1::BuilderFlag::kINT8);
     config->setFlag(nvinfer1::BuilderFlag::kFP16);
 #pragma GCC diagnostic pop
-    std::cout << "[TRT] FP16 Precision Enabled." << std::endl;
+    std::cout << "[TRT] INT8 & FP16 Precision Enabled." << std::endl;
 
     auto profile = builder->createOptimizationProfile();
     bool hasDynamic = false;
@@ -182,7 +183,7 @@ CudaError TrtDetector::BuildEngine(const std::string& onnxPath, const std::strin
 
             // Handle Dynamic Batch
             if (minDims.d[0] == -1) {
-                minDims.d[0] = 1;
+                minDims.d[0] = (int)BatchData::MIN_BATCH_SIZE;
                 optDims.d[0] = (int)BatchData::OPTIMUM_BATCH_SIZE;
                 maxDims.d[0] = (int)BatchData::MAX_BATCH_SIZE;
                 hasDynamic = true;
