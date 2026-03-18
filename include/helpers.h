@@ -22,11 +22,11 @@ static inline std::string ErrorSource(const char *file, int line) {
 
 class CudaError {
 public:
-    static inline std::string GetErrorString(cudaError_t err) {
+    static inline const char * GetErrorString(cudaError_t err) {
         return cudaGetErrorString(err);
     }
 
-    static inline std::string GetErrorString(nvjpegStatus_t err) {
+    static inline const char * GetErrorString(nvjpegStatus_t err) {
         // nvJPEG often doesn't have a standardized string function in older toolkits
         switch(err) {
         case NVJPEG_STATUS_SUCCESS: return "Success";
@@ -38,7 +38,7 @@ public:
         case NVJPEG_STATUS_EXECUTION_FAILED: return "Execution Failed";
         case NVJPEG_STATUS_ARCH_MISMATCH: return "Arch Mismatch";
         case NVJPEG_STATUS_INTERNAL_ERROR: return "Internal Error";
-        default: return "Unknown NVJPEG Error (" + std::to_string(err) + ")";
+        default: return "Unknown NVJPEG Error";
         }
     }
 
@@ -66,6 +66,14 @@ public:
 
     template <class T>
     CudaError(const std::string &source, T cudaErrCode) {
+// #ifdef ENABLE_DEBUG_SYNC
+//         if constexpr (std::is_same_v<T, cudaError_t>) {
+//             // If the initial async launch didn't fail, force a sync to catch execution faults
+//             if (!IsFailure(cudaErrCode)) {
+//                 cudaErrCode = cudaDeviceSynchronize();
+//             }
+//         }
+// #endif
         if (IsFailure(cudaErrCode)) {
             call_stack_.emplace_back(source, GetErrorString(cudaErrCode));
         }
@@ -101,13 +109,25 @@ private:
 } \
 }
 
-#define CUDA_CALL_NO_THROW(f) { \
-auto _res = (f); \
-    if (cropandweed::CudaError::IsFailure(_res)) { \
-        cropandweed::CudaError _err(ERROR_SOURCE, _res); \
-        std::cerr << _err.Text() << std::endl; \
-} \
+// #define CUDA_CALL_NO_THROW(f) { \
+// auto _res = (f); \
+//     if (cropandweed::CudaError::IsFailure(_res)) { \
+//         cropandweed::CudaError _err(ERROR_SOURCE, _res); \
+//         std::cerr << _err.Text() << std::endl; \
+// } \
+// }
+
+template <typename T>
+void LogDestructorErrorSafe(T err_code, const char* file, int line) noexcept {
+    if (static_cast<int>(err_code) != 0) {
+        std::cerr << "[Destructor Error] " << cropandweed::CudaError::GetErrorString(err_code)
+                  << " (Code: " << static_cast<int>(err_code) << ")"
+                  << " at " << file << ":" << line << "\n";
+    }
 }
+
+#define CUDA_CALL_NO_THROW(f) cropandweed::LogDestructorErrorSafe((f), __FILE__, __LINE__)
+
 
 #define CUDA_TRY(f) { \
     auto _res = (f); \
@@ -115,6 +135,28 @@ auto _res = (f); \
         return cropandweed::CudaError(ERROR_SOURCE, _res); \
 } \
 }
+
+#ifdef ENABLE_DEBUG_SYNC
+// Definition 1: With sync
+#define CUDA_CHECK_KERNEL(stream) { \
+cropandweed::CudaError _errLaunch(ERROR_SOURCE, cudaGetLastError()); \
+    if (cropandweed::CudaError::IsFailure(_errLaunch)) { \
+        return _errLaunch; \
+} \
+    cropandweed::CudaError _errSync(ERROR_SOURCE, cudaStreamSynchronize(stream)); \
+    if (cropandweed::CudaError::IsFailure(_errSync)) { \
+        return _errSync; \
+} \
+}
+#else
+// Definition 2: Without sync
+#define CUDA_CHECK_KERNEL(stream) { \
+cropandweed::CudaError _err(ERROR_SOURCE, cudaGetLastError()); \
+    if (cropandweed::CudaError::IsFailure(_err)) { \
+        return _err; \
+} \
+}
+#endif
 
 // Generic error generator for logical failures (non-CUDA APIs)
 #define CUDA_GENERAL_ERROR(msg) { \
@@ -163,9 +205,10 @@ public:
     }
 
     // Destructor automatically destroys it
-    ~CudaStream() {
+    ~CudaStream() noexcept {
         if (stream) {
             CUDA_CALL_NO_THROW(cudaStreamDestroy(stream));
+            stream = nullptr;
         }
     }
 
@@ -219,9 +262,10 @@ public:
         return CudaError();
     }
 
-    ~CudaEvent() {
+    ~CudaEvent() noexcept {
         if (event) {
             CUDA_CALL_NO_THROW(cudaEventDestroy(event));
+            event = nullptr;
         }
     }
 

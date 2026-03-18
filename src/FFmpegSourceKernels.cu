@@ -1,6 +1,7 @@
 #include "FFmpegSourceKernels.h"
 #include "helpers.h"
 #include <algorithm>
+#include <cstring>
 
 namespace cropandweed {
 
@@ -202,7 +203,7 @@ CudaError NV12ToRGBPlanar(
 
     if (use_texture_objects) {
         struct cudaResourceDesc resDescY;
-        memset(&resDescY, 0, sizeof(resDescY));
+        std::memset(&resDescY, 0, sizeof(resDescY));
         resDescY.resType = cudaResourceTypePitch2D;
         resDescY.res.pitch2D.devPtr = (void*)srcY;
         resDescY.res.pitch2D.desc = cudaCreateChannelDesc<uint8_t>();
@@ -211,7 +212,7 @@ CudaError NV12ToRGBPlanar(
         resDescY.res.pitch2D.pitchInBytes = srcPitch;
 
         struct cudaResourceDesc resDescUV;
-        memset(&resDescUV, 0, sizeof(resDescUV));
+        std::memset(&resDescUV, 0, sizeof(resDescUV));
         resDescUV.resType = cudaResourceTypePitch2D;
         resDescUV.res.pitch2D.devPtr = (void*)srcUV;
         resDescUV.res.pitch2D.desc = cudaCreateChannelDesc<uchar2>();
@@ -220,7 +221,7 @@ CudaError NV12ToRGBPlanar(
         resDescUV.res.pitch2D.pitchInBytes = srcPitch;
 
         struct cudaTextureDesc texDesc;
-        memset(&texDesc, 0, sizeof(texDesc));
+        std::memset(&texDesc, 0, sizeof(texDesc));
 
         // Key setting: Use NormalizedFloat to get 0.0-1.0 and enable hardware linear filtering for uint8
         texDesc.readMode = cudaReadModeNormalizedFloat;
@@ -240,6 +241,7 @@ CudaError NV12ToRGBPlanar(
             dstBatch, batchOffsetElements,
             dstW, dstH
             );
+        CUDA_CHECK_KERNEL(stream);
         CUDA_TRY(cudaStreamSynchronize(stream));
         CUDA_TRY(cudaDestroyTextureObject(texYObj));
         CUDA_TRY(cudaDestroyTextureObject(texUVObj));
@@ -250,10 +252,11 @@ CudaError NV12ToRGBPlanar(
             srcW, srcH,
             dstW, dstH
             );
+        CUDA_CHECK_KERNEL(stream);
         CUDA_TRY(cudaStreamSynchronize(stream));
     }
 
-    return CudaError(ERROR_SOURCE, cudaGetLastError());
+    return CudaError(); //CudaError(ERROR_SOURCE, cudaGetLastError());
 }
 
 } // namespace cropandweed

@@ -1,7 +1,7 @@
 #pragma once
 #include <cuda_runtime.h>
 #include "DetectionRaw.h"
-#include "helpers.h"
+#include "Block.h"
 
 namespace cropandweed {
 
@@ -57,12 +57,12 @@ struct TrackState {
  * @brief Executes the tracking logic (Predict, Match, Update, Ghost).
  */
 CudaError TrackBatch(int batchIndex,
-                     DetectionRaw* detections,
-                     int* countBuffer,
-                     TrackState* tracks,
-                     int* trackCount,
-                     int* nextTrackId,
-                     int* detectionMatches,
+                     BoundaryTypedBlock<DetectionRaw>& detections,
+                     BoundaryBlock<int>& countBuffer,
+                     TypedBlock<TrackState>& tracks,
+                     Block<int>& trackCount,
+                     Block<int>& nextTrackId,
+                     Block<int>& detectionMatches,
                      int stride,
                      int maxTracks,
                      int activeClasses,
@@ -71,18 +71,19 @@ CudaError TrackBatch(int batchIndex,
                      int imageHeight,
                      cudaStream_t stream);
 
-CudaError CompactTracks(TrackState *tracksBuffer,
-                        int* countBuffer,
+CudaError CompactTracks(TypedBlock<TrackState>& tracksBuffer,
+                        Block<int>& countBuffer,
+                        int maxTracks,
                         cudaStream_t stream);
 /**
  * @brief Draws bounding boxes and Track IDs onto the image buffer.
  */
-CudaError DrawDetections(float* imageBatch,
+CudaError DrawDetections(Block<float>& imageBatch,
                          int batchSize,
                          int width,
                          int height,
-                         const DetectionRaw* detections,
-                         const int* counts,
+                         const BoundaryTypedBlock<DetectionRaw>& detections,
+                         const BoundaryBlock<int>& counts,
                          cudaStream_t stream);
 
 } // namespace cropandweed

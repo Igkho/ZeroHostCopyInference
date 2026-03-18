@@ -138,85 +138,76 @@ __global__ void nms_kernel(DetectionRaw* __restrict__ boxes,
 
 }
 
-CudaError DecodeAndFilter(const float* d_output,
-                          DetectionRaw *candidateBuffer,
-                          int candidateBufferSize,
-                          int *countBuffer,
+CudaError DecodeAndFilter(const Block<float>& d_output,
+                          TypedBlock<DetectionRaw>& candidateBuffer,
+                          BoundaryBlock<int> &countBuffer,
                           int batchSize,
                           int numAnchors,
                           int numClasses,
                           float confThreshold,
                           cudaStream_t stream) {
-    if (d_output == nullptr || candidateBuffer == nullptr || candidateBufferSize <= 0 ||
-        countBuffer == nullptr || batchSize <= 0 ||
-        numAnchors <= 0 || numClasses <= 0 ||
+    if (d_output.empty() || candidateBuffer.empty() || countBuffer.empty() ||
+        batchSize <= 0 || numAnchors <= 0 || numClasses <= 0 ||
         (confThreshold < 0) || (confThreshold > 1)) {
         return CudaError(ERROR_SOURCE, "DecodeAndFilter invalid input");
     }
 
-    CUDA_TRY(cudaMemsetAsync(countBuffer, 0, sizeof(int), stream));
+    CUDA_TRY(countBuffer.fill(0, stream));
 
-//    int maxOut = candidateBufferSize / sizeof(DetectionRaw);
-    int maxOut = candidateBufferSize;
-//    auto* rawPtr = reinterpret_cast<DetectionRaw*>(candidateBuffer);
-    auto* rawPtr = candidateBuffer;
-
+    int maxOut = candidateBuffer.size();
+    auto* rawPtr = candidateBuffer.data();
     int totalThreads = numAnchors * batchSize;
     KernelGrid grid(totalThreads);
 
     decode_kernel<<<grid.gsize(), grid.bsize(), 0, stream>>>(
-        d_output,
+        d_output.data(),
         rawPtr,
-        countBuffer,
+        countBuffer.data(),
         maxOut,
         numAnchors,
         numClasses,
         batchSize,
         confThreshold
         );
-    return CudaError(ERROR_SOURCE, cudaGetLastError());
+    CUDA_CHECK_KERNEL(stream);
+    return CudaError();
 }
 
-CudaError RunNMS(DetectionRaw *candidateBuffer,
-                 int candidateBufferSize,
-                 int *candidateCountBuffer,
-                 DetectionRaw *finalOutputBuffer,
-                 int finalOutputBufferSize,
-                 int *finalOutputCounts,
-                 Block<uint8_t> &maskBuffer,
+CudaError RunNMS(TypedBlock<DetectionRaw>& candidateBuffer,
+                 BoundaryBlock<int> &candidateCountBuffer,
+                 BoundaryTypedBlock<DetectionRaw> &finalOutputBuffer,
+                 BoundaryBlock<int> &finalOutputCounts,
+                 Block<uint8_t>& maskBuffer,
                  float nmsThreshold,
                  int maxOutputPerBatch,
                  int batchSize,
                  cudaStream_t stream) {
-    if (candidateBuffer == nullptr || candidateBufferSize <= 0 || candidateCountBuffer == nullptr ||
-        finalOutputBuffer == nullptr || finalOutputBufferSize <= 0 || finalOutputCounts == nullptr ||
+    if (candidateBuffer.empty() || candidateCountBuffer.empty() ||
+        finalOutputBuffer.empty() || finalOutputCounts.empty() ||
         (nmsThreshold < 0) || (nmsThreshold > 1)) {
             return CudaError(ERROR_SOURCE, "RunNMS invalid input");
     }
 
     // 1. Get Count (Async copy)
-    int count = 0;
-    CUDA_TRY(cudaMemcpyAsync(&count, candidateCountBuffer, sizeof(int), cudaMemcpyDeviceToHost, stream));
-    CUDA_TRY(cudaStreamSynchronize(stream));
+    std::vector<int> count_v;
+    CUDA_TRY(candidateCountBuffer.to_vector(count_v, stream));
 
-    int maxCandidates = candidateBufferSize; // / sizeof(DetectionRaw);
-    count = std::min(count, maxCandidates);
+    int maxCandidates = candidateBuffer.size();
+    int count = std::min(count_v[0], maxCandidates);
 
     // Reset the final counts for all batches to 0
-    CUDA_TRY(cudaMemsetAsync(finalOutputCounts, 0, batchSize * sizeof(int), stream));
-
+    CUDA_TRY(finalOutputCounts.fill(0, stream));
     if (count == 0) {
         return CudaError();
     }
 
-    // auto* rawPtr = reinterpret_cast<DetectionRaw*>(candidateBuffer);
-    // auto* outPtr = reinterpret_cast<DetectionRaw*>(finalOutputBuffer);
-    auto* rawPtr = candidateBuffer;
-    auto* outPtr = finalOutputBuffer;
+    auto* rawPtr = candidateBuffer.data();
+    auto* outPtr = finalOutputBuffer.data();
 
     // 2. Sort Candidates (Async on Stream)
     thrust::device_ptr<DetectionRaw> ptr(rawPtr);
     thrust::sort(thrust::cuda::par.on(stream), ptr, ptr + count, DetectComparator());
+    CUDA_CHECK_KERNEL(stream);
 
     // 3. Run NMS Kernel
     // Temporary mask buffer (should ideally be passed in or cached)
@@ -225,6 +216,7 @@ CudaError RunNMS(DetectionRaw *candidateBuffer,
 
     KernelGrid grid(count);
     nms_kernel<<<grid.gsize(), grid.bsize(), 0, stream>>>(rawPtr, count, nmsThreshold, maskPtr);
+    CUDA_CHECK_KERNEL(stream);
 
     // 4. Unpack / Scatter
     // Reads masked candidates and scatters them into [BatchID * Stride + Slot]
@@ -233,118 +225,12 @@ CudaError RunNMS(DetectionRaw *candidateBuffer,
         maskPtr,
         count,
         outPtr,
-        finalOutputCounts,
+        finalOutputCounts.data(),
         maxOutputPerBatch
     );
+    CUDA_CHECK_KERNEL(stream);
 
-    return CudaError(ERROR_SOURCE, cudaGetLastError());
-}
-
-/*
-// CPU NMS IMPLEMENTATION
-CudaError RunNMS_CPU(uint8_t *candidateBuffer,
-                     int candidateBufferSize,
-                     int *countBuffer,
-                     int batchSize,
-                     float nmsThreshold,
-                     std::vector<std::vector<Detection>> &output) {
-
-    // 1. Download Count
-    int count = 0;
-    CUDA_TRY(cudaMemcpy(&count, countBuffer, sizeof(int), cudaMemcpyDeviceToHost));
-
-    // Safety clamp
-    int maxStored = candidateBufferSize / sizeof(DetectionRaw);
-    count = std::min(count, maxStored);
-
-    if (count == 0) {
-        output = std::vector<std::vector<Detection>>(batchSize);
-        return CudaError();
-    }
-
-    // 2. Download Candidates
-    std::vector<DetectionRaw> candidates(count);
-    CUDA_TRY(cudaMemcpy(candidates.data(), candidateBuffer,
-                         count * sizeof(DetectionRaw), cudaMemcpyDeviceToHost));
-
-    // 3. Sort & NMS (CPU implementation)
-    std::vector<std::vector<Detection>> results(batchSize);
-    std::vector<std::vector<DetectionRaw>> batchCandidates(batchSize);
-
-    // Group by Batch
-    for (const auto& c : candidates) {
-        int b = (int)c.batch_index;
-        if (b >= 0 && b < batchSize) {
-            batchCandidates[b].push_back(c);
-        }
-    }
-
-    // Process each batch
-    for (int b = 0; b < batchSize; ++b) {
-        auto& dets = batchCandidates[b];
-
-        // Sort by score descending
-        std::sort(dets.begin(), dets.end(), [](const DetectionRaw& a, const DetectionRaw& b) {
-            return a.score > b.score;
-        });
-
-        // Simple IOU Loop
-        for (size_t i = 0; i < dets.size(); ++i) {
-            if (dets[i].score == 0.0f) continue; // Suppressed
-
-            // Add to final results
-            Detection det;
-            det.x = dets[i].x; det.y = dets[i].y;
-            det.w = dets[i].w; det.h = dets[i].h;
-            det.score = dets[i].score;
-            det.classId = (int)dets[i].class_id;
-            results[b].push_back(det);
-
-            // Calculate corners for the current box (Box A)
-            // (x,y) is center, w,h is full width/height
-            float ax1 = dets[i].x - dets[i].w * 0.5f;
-            float ay1 = dets[i].y - dets[i].h * 0.5f;
-            float ax2 = dets[i].x + dets[i].w * 0.5f;
-            float ay2 = dets[i].y + dets[i].h * 0.5f;
-            float areaA = dets[i].w * dets[i].h;
-
-            // Suppress neighbors
-            for (size_t j = i + 1; j < dets.size(); ++j) {
-                if (dets[j].score == 0.0f) continue;
-
-                // Calculate corners for the neighbor box (Box B)
-                float bx1 = dets[j].x - dets[j].w * 0.5f;
-                float by1 = dets[j].y - dets[j].h * 0.5f;
-                float bx2 = dets[j].x + dets[j].w * 0.5f;
-                float by2 = dets[j].y + dets[j].h * 0.5f;
-                float areaB = dets[j].w * dets[j].h;
-
-                // Intersection Rectangle
-                float xx1 = std::max(ax1, bx1);
-                float yy1 = std::max(ay1, by1);
-                float xx2 = std::min(ax2, bx2);
-                float yy2 = std::min(ay2, by2);
-
-                float w = std::max(0.0f, xx2 - xx1);
-                float h = std::max(0.0f, yy2 - yy1);
-                float interArea = w * h;
-
-                // Union Area
-                float unionArea = areaA + areaB - interArea;
-
-                // IOU check
-                if (unionArea > 0.0f) {
-                    float iou = interArea / unionArea;
-                    if (iou > nmsThreshold) {
-                        dets[j].score = 0.0f; // Suppress by zeroing score
-                    }
-                }
-            }
-        }
-    }
-    output = std::move(results);
     return CudaError();
 }
-*/
 
 } // namespace cropandweed

@@ -62,43 +62,16 @@ CudaError TrtDetector::Init(const std::string& modelPath) {
 
     size_t rawVol = BatchData::MAX_BATCH_SIZE * channels * anchors;
     size_t maxCandidates = BatchData::MAX_BATCH_SIZE * BatchDetections::MAX_DETECTIONS_PER_FRAME * 10;
-//    size_t finalVol = BatchData::MAX_BATCH_SIZE * BatchDetections::MAX_DETECTIONS_PER_FRAME * sizeof(DetectionRaw);
 
     for (auto& res : pool_) {
         CUDA_TRY(res.rawOutput.reserve(rawVol, *cuda_stream_));
-        // CUDA_TRY(res.candidates.reserve(maxCandidates * sizeof(DetectionRaw), *cuda_stream_));
         CUDA_TRY(res.candidates.reserve(maxCandidates, *cuda_stream_));
         CUDA_TRY(res.candidateCount.reserve(1, *cuda_stream_));
-
-//        CUDA_TRY(res.result.data.reserve(finalVol));
-//        CUDA_TRY(res.result.counts.reserve(BatchData::MAX_BATCH_SIZE));
-
-        // Ensure event exists
-//        if (!res.result.readyEvent) {
-//            CUDA_TRY(CudaEvent::Create(res.result.readyEvent));
-//        }
-
-        CUDA_TRY(cudaMemsetAsync(res.candidateCount.data(), 0, sizeof(int), *cuda_stream_));
+        CUDA_TRY(res.candidateCount.fill(0, *cuda_stream_));
     }
     CUDA_TRY(cudaStreamSynchronize(*cuda_stream_));
     return CudaError();
 }
-
-// std::pair<size_t, size_t> TrtDetector::GetInputSize() const {
-
-//     // Standard NCHW: 0:Batch, 1:Channel, 2:Height, 3:Width
-//     if (inputDims_.nbDims >= 4) {
-//         size_t h = static_cast<size_t>(inputDims_.d[2]);
-//         size_t w = static_cast<size_t>(inputDims_.d[3]);
-
-//         // Handle Dynamic Shapes (Dimension is -1)
-//         if (h == (size_t)-1) h = 1024;
-//         if (w == (size_t)-1) w = 1024;
-
-//         return {w, h};
-//     }
-//     return {1024, 1024}; // Fallback for unexpected shapes
-// }
 
 CudaError TrtDetector::LoadEngine(const std::string& enginePath) {
 
@@ -223,7 +196,16 @@ CudaError TrtDetector::BuildEngine(const std::string& onnxPath, const std::strin
     std::cout << "[TRT] Optimizing model..." << std::endl;
     auto plan = std::unique_ptr<nvinfer1::IHostMemory>(builder->buildSerializedNetwork(*network, *config));
     if (!plan) {
-        return CudaError(ERROR_SOURCE, "Failed to build TRT Engine");
+        std::cout << "[TRT] INT8 Calibration missing or failed. Falling back to strict FP16." << std::endl;
+        // Fallback Attempt: Clear the config, drop INT8, and retry
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+        config->clearFlag(nvinfer1::BuilderFlag::kINT8);
+#pragma GCC diagnostic pop
+        plan = std::unique_ptr<nvinfer1::IHostMemory>(builder->buildSerializedNetwork(*network, *config));
+        if (!plan) {
+            return CudaError(ERROR_SOURCE, "Failed to build TRT Engine even after FP16 fallback");
+        }
     }
 
     // SAVE ENGINE TO DISK
@@ -275,21 +257,18 @@ CudaError TrtDetector::Detect(const BatchData& input, BatchDetections &output) {
 
     // 2. Resize Buffers (Efficient Reuse)
     CUDA_TRY(res.rawOutput.resize(batchSize * channels * anchors, *cuda_stream_));
-    size_t candSize = BatchDetections::MAX_DETECTIONS_PER_FRAME * 10; // * sizeof(DetectionRaw);
+    size_t candSize = batchSize * BatchDetections::MAX_DETECTIONS_PER_FRAME * 10;
     CUDA_TRY(res.candidates.resize(candSize, *cuda_stream_));
-    CUDA_TRY(cudaMemsetAsync(res.candidates.data(), 0, res.candidates.byte_size(), *cuda_stream_));
 
     CUDA_TRY(res.candidateCount.resize(1, *cuda_stream_));
-    CUDA_TRY(cudaMemsetAsync(res.candidateCount.data(), 0, sizeof(int), *cuda_stream_));
+    CUDA_TRY(res.candidateCount.fill(0, *cuda_stream_));
 
     // Resize Output Structure
     size_t resultSize = batchSize * BatchDetections::MAX_DETECTIONS_PER_FRAME; // * sizeof(DetectionRaw);
     CUDA_TRY(output.data.resize(resultSize, *cuda_stream_));
-//    CUDA_TRY(cudaMemsetAsync(output.data.data(), 0, resultSize, *cuda_stream_));
-    CUDA_TRY(cudaMemsetAsync(output.data.data(), 0, output.data.byte_size(), *cuda_stream_));
 
     CUDA_TRY(output.counts.resize(batchSize, *cuda_stream_));
-    CUDA_TRY(cudaMemsetAsync(output.counts.data(), 0, output.counts.byte_size(), *cuda_stream_));
+    CUDA_TRY(output.counts.fill(0, *cuda_stream_));
 
     if (!output.readyEvent) {
         CUDA_TRY(CudaEvent::Create(output.readyEvent));
@@ -313,10 +292,9 @@ CudaError TrtDetector::Detect(const BatchData& input, BatchDetections &output) {
 
     // Post-Processing (Kernel)
     CUDA_TRY(DecodeAndFilter(
-        res.rawOutput.data(),
-        res.candidates.data(),
-        res.candidates.size(),
-        res.candidateCount.data(),
+        res.rawOutput,
+        res.candidates,
+        res.candidateCount,
         batchSize,
         anchors,
         channels - 4,
@@ -325,12 +303,10 @@ CudaError TrtDetector::Detect(const BatchData& input, BatchDetections &output) {
 
     // NMS (Kernel)
     CUDA_TRY(RunNMS(
-        res.candidates.data(),
-        res.candidates.size(),
-        res.candidateCount.data(),
-        output.data.data(),
-        output.data.size(),
-        output.counts.data(),
+        res.candidates,
+        res.candidateCount,
+        output.data,
+        output.counts,
         res.nmsMask,
         0.45f, // IOU threshold
         BatchDetections::MAX_DETECTIONS_PER_FRAME, // Stride
@@ -339,9 +315,6 @@ CudaError TrtDetector::Detect(const BatchData& input, BatchDetections &output) {
 
     // Finalize
     CUDA_TRY(cudaEventRecord(*output.readyEvent, *cuda_stream_));
-
-    // Swap results (Zero copy ownership transfer)
-    // std::swap(output, res.result);
 
     return CudaError();
 }

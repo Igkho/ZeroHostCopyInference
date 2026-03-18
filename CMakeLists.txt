@@ -40,7 +40,6 @@ include(FetchContent)
 FetchContent_Declare(
   googletest
   URL https://github.com/google/googletest/archive/b514bdc898e2951020cbdca1304b75f5950d1f59.zip
-  DOWNLOAD_EXTRACT_TIMESTAMP true
 )
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
@@ -49,14 +48,12 @@ FetchContent_MakeAvailable(googletest)
 FetchContent_Declare(
   CLI11
   URL https://github.com/CLIUtils/CLI11/archive/refs/tags/v2.6.1.zip
-  DOWNLOAD_EXTRACT_TIMESTAMP true
 )
 FetchContent_MakeAvailable(CLI11)
 
 FetchContent_Declare(
   yaml-cpp
   URL https://github.com/jbeder/yaml-cpp/archive/refs/tags/yaml-cpp-0.7.0.zip
-  DOWNLOAD_EXTRACT_TIMESTAMP true
 )
 # Suppress yaml-cpp tests/tools to speed up build
 set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -112,7 +109,6 @@ else()
     FetchContent_Declare(
       onnxruntime_bin
       URL ${ORT_URL}
-      DOWNLOAD_EXTRACT_TIMESTAMP true
     )
     FetchContent_MakeAvailable(onnxruntime_bin)
 
@@ -177,6 +173,10 @@ macro(configure_target target_name includedir)
 
   target_compile_options(${target_name} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler -fopenmp>)
   target_compile_options(${target_name} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--default-stream per-thread>)
+
+  target_compile_options(${target_name} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
+
+  target_compile_definitions(${target_name} PRIVATE ENABLE_DEBUG_SYNC)
 
   # -Xnvlink passes the -w flag to the device linker, silencing incompatible library warnings
   target_link_options(${target_name} PRIVATE $<DEVICE_LINK:-Xnvlink -w>)

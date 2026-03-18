@@ -145,8 +145,8 @@ TEST_F(FFmpegSourceTest, VerifyRGBContent) {
     if (process) {
         cudaEventSynchronize(*batch.readyEvent);
 
-        std::vector<float> hostData(w * h * 3);
-        cudaMemcpy(hostData.data(), batch.deviceData.data(), hostData.size() * sizeof(float), cudaMemcpyDeviceToHost);
+        std::vector<float> hostData; //(w * h * 3);
+        ASSERT_CUDA_SUCCESS(batch.deviceData.to_vector(hostData));
 
         float sum = 0.0f;
         for(float v : hostData) sum += v;
@@ -197,7 +197,8 @@ protected:
         // Output: 2x2 image, 3 channels.
         size_t dstElements = srcW * srcH * 3;
         ASSERT_CUDA_SUCCESS(d_Dst.resize(dstElements));
-        cudaMemset(d_Dst.data(), 0, dstElements * sizeof(float));
+        ASSERT_CUDA_SUCCESS(d_Dst.fill(0, 0));
+
 
         // 3. Copy Data with Pitch (Host: Tight, Device: Aligned)
         // Use cudaMemcpy2D to handle the stride difference automatically
@@ -220,8 +221,8 @@ protected:
         cudaDeviceSynchronize();
 
         // Download Result
-        std::vector<float> h_Dst(dstElements);
-        cudaMemcpy(h_Dst.data(), d_Dst.data(), dstElements * sizeof(float), cudaMemcpyDeviceToHost);
+        std::vector<float> h_Dst;
+        ASSERT_CUDA_SUCCESS(d_Dst.to_vector(h_Dst));
 
         // Verification Logic
         float tolerance = 0.05f;

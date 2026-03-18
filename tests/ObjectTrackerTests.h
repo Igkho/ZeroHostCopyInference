@@ -18,13 +18,6 @@ namespace cropandweed {
 
 class ObjectTrackerTest : public ::testing::Test {
 protected:
-    // Helper to copy vector to TypedBlock
-    template<typename T>
-    void CopyToDevice(TypedBlock<T>& block, const std::vector<T>& data) {
-        ASSERT_CUDA_SUCCESS(block.resize(data.size()));
-        ASSERT_CUDA_SUCCESS(cudaMemcpy(block.data(), data.data(),
-                                       data.size() * sizeof(T), cudaMemcpyHostToDevice));
-    }
 
     // Helper context for White-Box Kernel Testing
     // This allows us to manually manipulate GPU buffers that are usually private to the class.
@@ -60,8 +53,8 @@ TEST_F(ObjectTrackerTest, CreatesNewTrack) {
         {100.f, 100.f, 50.f, 50.f, 0.9f, 0.f, 0.f, 0.f}
     };
 
-    TypedBlock<DetectionRaw> d_dets;
-    Block<int> d_detCount;
+    BoundaryTypedBlock<DetectionRaw> d_dets;
+    BoundaryBlock<int> d_detCount;
 
     ASSERT_CUDA_SUCCESS(d_dets.assign(dets));
     ASSERT_CUDA_SUCCESS(d_detCount.assign({(int)dets.size()}));
@@ -69,12 +62,12 @@ TEST_F(ObjectTrackerTest, CreatesNewTrack) {
     // 2. Run Kernel Wrapper Directly
     ASSERT_CUDA_SUCCESS(TrackBatch(
         0, // Batch Index
-        d_dets.data(),
-        d_detCount.data(),
-        ctx.tracks.data(),
-        ctx.trackCount.data(),
-        ctx.nextTrackId.data(),
-        ctx.matches.data(),
+        d_dets,
+        d_detCount,
+        ctx.tracks,
+        ctx.trackCount,
+        ctx.nextTrackId,
+        ctx.matches,
         100, // Stride
         ctx.maxTracks,
         1,   // Active Classes
@@ -121,16 +114,16 @@ TEST_F(ObjectTrackerTest, UpdatesExistingTrack) {
     std::vector<DetectionRaw> dets = {
         {110.f, 100.f, 50.f, 50.f, 0.9f, 0.f, 0.f, 0.f}
     };
-    TypedBlock<DetectionRaw> d_dets;
-    Block<int> d_detCount;
+    BoundaryTypedBlock<DetectionRaw> d_dets;
+    BoundaryBlock<int> d_detCount;
 
     ASSERT_CUDA_SUCCESS(d_dets.assign(dets));
     ASSERT_CUDA_SUCCESS(d_detCount.assign({1}));
 
     // 3. Run Tracking
     ASSERT_CUDA_SUCCESS(TrackBatch(
-        0, d_dets.data(), d_detCount.data(),
-        ctx.tracks.data(), ctx.trackCount.data(), ctx.nextTrackId.data(), ctx.matches.data(),
+        0, d_dets, d_detCount,
+        ctx.tracks, ctx.trackCount, ctx.nextTrackId, ctx.matches,
         100, ctx.maxTracks, 1, 0.1f, 1024, 1024, 0
         ));
 
@@ -165,15 +158,15 @@ TEST_F(ObjectTrackerTest, GhostsMissingTrack) {
     ASSERT_CUDA_SUCCESS(ctx.trackCount.assign({1}));
 
     // 2. Input: NO detections (Empty batch)
-    TypedBlock<DetectionRaw> d_dets;
+    BoundaryTypedBlock<DetectionRaw> d_dets;
     ASSERT_CUDA_SUCCESS(d_dets.resize(100));
-    Block<int> d_detCount;
+    BoundaryBlock<int> d_detCount;
     ASSERT_CUDA_SUCCESS(d_detCount.assign({0})); // 0 detections
 
     // 3. Run Tracking
     ASSERT_CUDA_SUCCESS(TrackBatch(
-        0, d_dets.data(), d_detCount.data(),
-        ctx.tracks.data(), ctx.trackCount.data(), ctx.nextTrackId.data(), ctx.matches.data(),
+        0, d_dets, d_detCount,
+        ctx.tracks, ctx.trackCount, ctx.nextTrackId, ctx.matches,
         100, ctx.maxTracks, 1, 0.1f, 1024, 1024, 0
         ));
 
@@ -209,18 +202,18 @@ TEST_F(ObjectTrackerTest, Class_EndToEndIntegration) {
     std::vector<DetectionRaw> dets = {
         {100.f, 100.f, 50.f, 50.f, 0.9f, 0.f, 0.f, 0.f}
     };
-    TypedBlock<DetectionRaw> d_dets;
+    BoundaryTypedBlock<DetectionRaw> d_dets;
     ASSERT_CUDA_SUCCESS(d_dets.assign(dets));
 
-    Block<int> d_counts;
+    BoundaryBlock<int> d_counts;
     ASSERT_CUDA_SUCCESS(d_counts.assign({1}));
 
     // 3. Run ProcessBatch via the Class API
     // This tests if the internal buffers (tracks_, nextTrackId_) are correctly allocated and used.
     ASSERT_CUDA_SUCCESS(tracker->ProcessBatch(
         0,
-        d_dets.data(),
-        d_counts.data(),
+        d_dets,
+        d_counts,
         100, // Stride
         1024, 1024,
         0 // Stream

@@ -19,12 +19,6 @@ __device__ const uint16_t DIGIT_MAP[10] = {
     0x79CF, 0x79EF, 0x7249, 0x7BEF, 0x7BC9
 };
 
-// // Colors (RGB normalized)
-// __device__ const float CLASS_COLORS[6][3] = {
-//     {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.5f, 1.0f},
-//     {1.0f, 1.0f, 0.0f}, {1.0f, 0.0f, 1.0f}, {0.0f, 1.0f, 1.0f}
-// };
-
 // Procedural Color Generation (Golden Angle)
 // Generates distinct colors for any Class ID without fixed arrays
 __device__ void GetProceduralColor(int cls, float& r, float& g, float& b) {
@@ -473,7 +467,6 @@ __global__ void DrawBoxesKernel(float* __restrict__ imageBatch,
     int t_h = min(thickness, (y2 - y1) / 2); // Clamp Y thickness
 
     // Draw Box
-//    for (int t = 0; t < thickness; ++t) {
     for (int t = 0; t < t_h; ++t) {
         for (int x = x1; x <= x2; ++x) {
             int py_top = min(y1 + t, height - 1);
@@ -484,7 +477,6 @@ __global__ void DrawBoxesKernel(float* __restrict__ imageBatch,
             img[idxB] = r; img[idxB + planeSize] = g; img[idxB + 2*planeSize] = b;
         }
     }
-//    for (int t = 0; t < thickness; ++t) {
     for (int t = 0; t < t_w; ++t) {
         for (int y = y1; y <= y2; ++y) {
             int px_left = min(x1 + t, width - 1);
@@ -499,9 +491,6 @@ __global__ void DrawBoxesKernel(float* __restrict__ imageBatch,
     // Draw ID
     int trkId = (int)det.track_id;
     if (trkId > 0) {
-        // int velocityVal = (int)det.score;
-        // if (velocityVal < 0) velocityVal = 0;
-        // if (velocityVal > 999) velocityVal = 999;
 
         int padding = 3;
         int idX = x1 + padding;
@@ -511,8 +500,6 @@ __global__ void DrawBoxesKernel(float* __restrict__ imageBatch,
         int numDigits = (trkId == 0) ? 1 : 0;
         while (temp > 0) { temp /= 10; numDigits++; }
 
-//        int digitW = 3;
-//        int digitSpacing = 1;
         // Total text width: (digits * 3) + (digits-1 * 1) = digits * 4 - 1
         // We approximate stride as 4 per digit.
         int textW = numDigits * 4;
@@ -545,12 +532,12 @@ struct IsDeadTrack {
 // =================================================================================
 
 CudaError TrackBatch(int batchIndex,
-                     DetectionRaw* detections,
-                     int* countBuffer,
-                     TrackState* tracks,
-                     int* trackCount,
-                     int* nextTrackId,
-                     int* detectionMatches,
+                     BoundaryTypedBlock<DetectionRaw> &detections,
+                     BoundaryBlock<int> &countBuffer,
+                     TypedBlock<TrackState> &tracks,
+                     Block<int> &trackCount,
+                     Block<int> &nextTrackId,
+                     Block<int> &detectionMatches,
                      int stride,
                      int maxTracks,
                      int activeClasses,
@@ -559,43 +546,46 @@ CudaError TrackBatch(int batchIndex,
                      int imageHeight,
                      cudaStream_t stream)
 {
-    if (batchIndex < 0 || !detections || !countBuffer || !tracks || !trackCount ||
-        !nextTrackId || !detectionMatches || stride <= 0 || maxTracks < 0 || activeClasses < 0 ||
-        imageWidth <= 0 || imageHeight <= 0) {
+    if (batchIndex < 0 || detections.empty() || countBuffer.empty() || tracks.empty() ||
+        trackCount.empty() || nextTrackId.empty() || detectionMatches.empty() ||
+        stride <= 0 || maxTracks < 0 || activeClasses < 0 || imageWidth <= 0 || imageHeight <= 0) {
         return CudaError(ERROR_SOURCE, "Invalid input parameters in TrackBatch");
     }
 
     // Predict
     KernelGrid gridPredict(maxTracks);
-    PredictTracksKernel<<<gridPredict.gsize(), gridPredict.bsize(), 0, stream>>>(tracks, trackCount);
+    PredictTracksKernel<<<gridPredict.gsize(), gridPredict.bsize(), 0, stream>>>(tracks.data(),
+                                                                                 trackCount.data());
+    CUDA_CHECK_KERNEL(stream);
 
     // Get Count for THIS batch (Async)
-    int currentDetCount = 0;
-    int currentTrackCount = 0;
+    std::vector<int> currentDetCounts;
+    std::vector<int> currentTrackCounts;
 
-    // countBuffer is an array [Batch0, Batch1...], so offset by batchIndex
-    CUDA_TRY(cudaMemcpyAsync(&currentDetCount, countBuffer + batchIndex, sizeof(int), cudaMemcpyDeviceToHost, stream));
-    CUDA_TRY(cudaMemcpyAsync(&currentTrackCount, trackCount, sizeof(int), cudaMemcpyDeviceToHost, stream));
-    CUDA_TRY(cudaStreamSynchronize(stream));
+    CUDA_TRY(countBuffer.to_vector(currentDetCounts, stream));
+
+    CUDA_TRY(trackCount.to_vector(currentTrackCounts, stream));
 
     // Clamp count to stride (capacity)
-    currentDetCount = std::min(currentDetCount, stride);
+    int currentDetCount = std::min(currentDetCounts[batchIndex], stride);
+    int currentTrackCount = std::min(currentTrackCounts[0], maxTracks);
 
     // Calculate slice pointer
-    DetectionRaw* batchDets = detections + (batchIndex * stride);
+    DetectionRaw* batchDets = detections.data() + (batchIndex * stride);
 
     if (currentDetCount > 0) {
         // Match (Pass the slice, not the whole buffer)
         KernelGrid gridMatch(currentDetCount);
         MatchDetectionsKernel<<<gridMatch.gsize(), gridMatch.bsize(), 0, stream>>>(
-            batchDets, currentDetCount, tracks, currentTrackCount, detectionMatches
+            batchDets, currentDetCount, tracks.data(), currentTrackCount, detectionMatches.data()
         );
-
+        CUDA_CHECK_KERNEL(stream);
         // Update
         UpdateTracksKernel<<<gridMatch.gsize(), gridMatch.bsize(), 0, stream>>>(
-            batchDets, currentDetCount, detectionMatches, tracks, trackCount, maxTracks, nextTrackId,
-            activeClasses, alpha, imageWidth, imageHeight
+            batchDets, currentDetCount, detectionMatches.data(), tracks.data(), trackCount.data(),
+            maxTracks, nextTrackId.data(), activeClasses, alpha, imageWidth, imageHeight
         );
+        CUDA_CHECK_KERNEL(stream);
     }
 
     // Ghosts
@@ -603,54 +593,61 @@ CudaError TrackBatch(int batchIndex,
         int validCount = std::min(currentTrackCount, TRACKER_MAX_TRACKS);
         KernelGrid gridGhost(validCount, 1024);
         GhostAndCleanupKernel<<<gridGhost.gsize(), gridGhost.bsize(), 0, stream>>>(
-            tracks, trackCount, batchDets, countBuffer + batchIndex, stride, (float)batchIndex,
-            activeClasses, imageWidth, imageHeight
+            tracks.data(), trackCount.data(), batchDets, countBuffer.data() + batchIndex, stride,
+            (float)batchIndex, activeClasses, imageWidth, imageHeight
         );
+        CUDA_CHECK_KERNEL(stream);
     }
 
-    return CudaError(ERROR_SOURCE, cudaGetLastError());
+    return CudaError();
 }
 
 // Tracks compaction implementation
-CudaError CompactTracks(TrackState* tracksBuffer,
-                        int* countBuffer,
+CudaError CompactTracks(TypedBlock<TrackState> &tracksBuffer,
+                        Block<int> &countBuffer,
+                        int maxTracks,
                         cudaStream_t stream) {
+    if (tracksBuffer.empty() || countBuffer.empty() || maxTracks <= 0) {
+        return CudaError(ERROR_SOURCE, "Invalid input parameters in CompactTracks");
+    }
+    std::vector<int> currentCounts;
 
-    int currentCount = 0;
-    CUDA_TRY(cudaMemcpyAsync(&currentCount, countBuffer, sizeof(int), cudaMemcpyDeviceToHost, stream));
-    CUDA_TRY(cudaStreamSynchronize(stream));
+    CUDA_TRY(countBuffer.to_vector(currentCounts, stream));
+    int currentCount = std::min(currentCounts[0], maxTracks);
 
     if (currentCount == 0) {
         return CudaError();
     }
 
     // Cast byte buffer to struct pointer
-//    TrackState* ptr = reinterpret_cast<TrackState*>(tracksBuffer);
-    TrackState* ptr = tracksBuffer;
+    TrackState* ptr = tracksBuffer.data();
 
     // Partition: Move live tracks to front, dead to back
     thrust::device_ptr<TrackState> t_ptr(ptr);
+
     auto new_end = thrust::remove_if(thrust::cuda::par.on(stream), t_ptr, t_ptr + currentCount, IsDeadTrack());
+    CUDA_CHECK_KERNEL(stream);
 
     // Calculate new count
     int newCount = (int)(new_end - t_ptr);
 
     // Update global count on device
     if (newCount != currentCount) {
-        CUDA_TRY(cudaMemcpyAsync(countBuffer, &newCount, sizeof(int), cudaMemcpyHostToDevice, stream));
+        CUDA_TRY(countBuffer.fill(newCount, stream));
     }
 
     return CudaError();
 }
 
-CudaError DrawDetections(float* imageBatch,
+CudaError DrawDetections(Block<float> &imageBatch,
                          int batchSize,
                          int width,
                          int height,
-                         const DetectionRaw* detections,
-                         const int* counts,
+                         const BoundaryTypedBlock<DetectionRaw> &detections,
+                         const BoundaryBlock<int> &counts,
                          cudaStream_t stream) {
-    if (!imageBatch || batchSize <= 0 || width <= 0 || height <= 0 || !detections || !counts) {
+    if (imageBatch.empty() || batchSize <= 0 || width <= 0 || height <= 0 ||
+         detections.empty() || counts.empty()) {
         return CudaError(ERROR_SOURCE, "Invalid input parameters in DrawDetections");
     }
 
@@ -659,10 +656,11 @@ CudaError DrawDetections(float* imageBatch,
     KernelGrid grid(totalSlots);
 
     DrawBoxesKernel<<<grid.gsize(), grid.bsize(), 0, stream>>>(
-        imageBatch, width, height, detections, counts, batchSize, stride
+        imageBatch.data(), width, height, detections.data(), counts.data(), batchSize, stride
         );
+    CUDA_CHECK_KERNEL(stream);
 
-    return CudaError(ERROR_SOURCE, cudaGetLastError());
+    return CudaError();
 }
 
 } // namespace cropandweed

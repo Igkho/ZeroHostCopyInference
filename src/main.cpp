@@ -156,6 +156,8 @@ int main(int argc, char** argv) {
     } catch (const std::exception& e) {
         std::cerr << "CRITICAL ERROR: " << e.what() << std::endl;
         return -1;
+    } catch (...) {
+        std::cerr << "UNKNOWN PROPRIETARY EXCEPTION THROWN!" << std::endl;
     }
 
     return 0;

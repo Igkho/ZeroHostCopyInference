@@ -75,7 +75,7 @@ TEST_F(OnnxDetectorTest, DetectRunsEndToEnd) {
     ASSERT_CUDA_SUCCESS(BatchData::Create(input, 0, batchSize, props.inputWidth, props.inputHeight));
 
     // [FIX] Use ASSERT_EQ instead of CUDA_TRY for raw CUDA calls in void function
-    ASSERT_EQ(cudaMemsetAsync(input->deviceData.data(), 0, input->deviceData.byte_size(), 0), cudaSuccess);
+    ASSERT_CUDA_SUCCESS(input->deviceData.fill(0, 0));
 
     if (input->readyEvent) cudaEventRecord(*input->readyEvent, 0);
 
@@ -101,8 +101,7 @@ TEST_F(OnnxDetectorTest, HandlesBatchSizeChanges) {
     {
         std::shared_ptr<BatchData> input;
         ASSERT_CUDA_SUCCESS(BatchData::Create(input, 0, 1, props.inputWidth, props.inputHeight));
-        // [FIX]
-        ASSERT_EQ(cudaMemset(input->deviceData.data(), 0, input->deviceData.byte_size()), cudaSuccess);
+        ASSERT_CUDA_SUCCESS(input->deviceData.fill(0, 0));
 
         if (input->readyEvent) cudaEventRecord(*input->readyEvent, 0);
 
@@ -115,8 +114,7 @@ TEST_F(OnnxDetectorTest, HandlesBatchSizeChanges) {
     {
         std::shared_ptr<BatchData> input;
         ASSERT_CUDA_SUCCESS(BatchData::Create(input, 1, 4, props.inputWidth, props.inputHeight));
-        // [FIX]
-        ASSERT_EQ(cudaMemset(input->deviceData.data(), 0, input->deviceData.byte_size()), cudaSuccess);
+        ASSERT_CUDA_SUCCESS(input->deviceData.fill(0, 0));
 
         if (input->readyEvent) cudaEventRecord(*input->readyEvent, 0);
 

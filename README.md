@@ -32,12 +32,12 @@ The previous phases **Phase 3 (Integration)** and **Phase 4 (Functional Inferenc
 |**Stub Detector** | ✅ **Stable** | Pass-through module, validated for pipeline latency profiling. |
 | **Output / NVJpeg** | ✅ **Stable** | Saves frames from GPU memory to disk as separate *.jpg images. |
 | **Inference Pipeline** | ✅ **Stable** | Connects all the stages together. |
-| **ONNX Detector** | ✅ **Stable** | Implemented with Zero-Copy input. |
+| **ONNX Detector** | ✅ **Optimized** | FP32 Inference optimized (~38 FPS). |
 | **TensorRT Detector** | ✅ **Stable** | Engine builder & `enqueueV3` implemented. |
 | **Object Tracker** | ✅ **Stable** | Kernels for position prediction, IOU matching, velocity filtering. |
 | **Post-Processing** | ✅ **Stable** | Custom CUDA kernels for YOLOv8 output decoding & NMS. |
 | **Windows Port** | 🚧 **WIP** | Adapting CMake & CUDA |
-| **Jetson Port** | 🚧 **WIP** | ARM64 optimization. |
+| **Jetson Port** | 🚧 **WIP** | New memory zero-copy abstractions implemented for Jetson UMA. |
 
 ---
 
@@ -63,7 +63,7 @@ The model is hosted in the research repository (AGPL-3.0):
 ### Supported Platforms
 * ✅ Linux x64 (Verified on Ubuntu 24.04 / RTX 3060 Ti)
 * 🚧 Windows 10/11 (Build scripts implemented, pending validation)
-* 🚧 Nvidia Jetson Orin (CMake configuration ready, pending hardware tests)
+* 🚧 Nvidia Jetson Orin (CMake configuration and memory abstractions ready, pending hardware tests)
 
 Note: The CMakeLists.txt contains specific logic for vcpkg (Windows) and aarch64 (Jetson), but these targets are currently experimental.
 
@@ -179,7 +179,7 @@ Both **TensorRT** (Highly Optimized) and **ONNX Runtime** (Generic Compatibility
 | :--- | :--- | :--- | :--- | :--- |
 | **TensorRT (INT8)** | **~164.8** | **~3.36 ms** | **1.4x** | Maximum performance. **Recommended.** |
 | **TensorRT (FP16)** | **~118.1** | **~5.58 ms** | **1.0x (Ref)** | Baseline hardware acceleration. |
-| **ONNX Runtime** | **~10.5** | **~94.8 ms** | **0.08x** | Generic execution. Useful for testing new models. |
+| **ONNX Runtime** | **~38.4** | **~26.0 ms** | **0.33x** | Generic execution. Useful for testing new models. |
 
 
 ## ⚖️ License

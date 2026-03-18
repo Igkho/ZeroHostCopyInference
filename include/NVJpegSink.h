@@ -28,7 +28,7 @@ public:
 
     ~NVJpegSink() override;
 
-    CudaError Save(const BatchData& data, const BatchDetections &results) override;
+    CudaError Save(BatchData& data, BatchDetections &results) override;
 
 private:
     CudaError CheckNVJpegVersion() const;
@@ -45,7 +45,7 @@ private:
     std::unique_ptr<CudaStream> cuda_stream_;
     std::unique_ptr<ObjectTracker> tracker_;
     Block<uint8_t> buffer_block_;
-    Block<uint8_t, MemoryType::Pinned> pinned_buffer_;
+    HostStagingBlock<uint8_t> pinned_buffer_;
 };
 
 } // namespace cropandweed

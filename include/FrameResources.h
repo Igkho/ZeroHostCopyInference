@@ -9,13 +9,8 @@ namespace cropandweed {
 struct FrameResources {
     // Direct fields: Metadata (size, ptr) lives inside FrameResources memory
     Block<float> rawOutput;
-//    Block<uint8_t> candidates;
     TypedBlock<DetectionRaw> candidates;
-
-    Block<int> candidateCount;
-    
-    // Even nested structs can hold direct Blocks
-//    BatchDetections result;
+    BoundaryBlock<int> candidateCount;
 
     Block<uint8_t> nmsMask;
     
@@ -34,7 +29,6 @@ struct FrameResources {
         CUDA_TRY(candidateCount.resize(1, stream));
         
         // Init nested items
-        // CUDA_TRY(result.data.resize(500));
         CUDA_TRY(nmsMask.resize(1, stream));
 
         // Init Event

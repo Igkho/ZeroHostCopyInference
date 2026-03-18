@@ -48,16 +48,15 @@ TEST_F(DetectorKernelsTest, DecodeAndFilter_ThresholdsAndLayout) {
     ASSERT_CUDA_SUCCESS(d_output.assign(h_output));
 
     TypedBlock<DetectionRaw> d_candidates;
-    Block<int> d_count;
+    BoundaryBlock<int> d_count;
 
     ASSERT_CUDA_SUCCESS(d_candidates.resize(10));
     ASSERT_CUDA_SUCCESS(d_count.resize(1));
 
     ASSERT_CUDA_SUCCESS(DecodeAndFilter(
-        d_output.data(),
-        d_candidates.data(),
-        10,
-        d_count.data(),
+        d_output,
+        d_candidates,
+        d_count,
         batchSize,
         numAnchors,
         numClasses,
@@ -90,25 +89,23 @@ TEST_F(DetectorKernelsTest, RunNMS_SuppressesOverlap) {
     int numCandidates = (int)candidates.size();
 
     TypedBlock<DetectionRaw> d_candidates;
-    Block<int> d_candCount;
+    BoundaryBlock<int> d_candCount;
 
     ASSERT_CUDA_SUCCESS(d_candidates.assign(candidates));
     ASSERT_CUDA_SUCCESS(d_candCount.assign({numCandidates}));
 
-    TypedBlock<DetectionRaw> d_final;
-    Block<int> d_finalCount;
+    BoundaryTypedBlock<DetectionRaw> d_final;
+    BoundaryBlock<int> d_finalCount;
     Block<uint8_t> d_mask;
 
     ASSERT_CUDA_SUCCESS(d_final.resize(10));
     ASSERT_CUDA_SUCCESS(d_finalCount.resize(1));
 
     ASSERT_CUDA_SUCCESS(RunNMS(
-        d_candidates.data(),
-        numCandidates,
-        d_candCount.data(),
-        d_final.data(),
-        10,
-        d_finalCount.data(),
+        d_candidates,
+        d_candCount,
+        d_final,
+        d_finalCount,
         d_mask,
         0.45f,
         10,

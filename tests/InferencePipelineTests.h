@@ -130,7 +130,7 @@ class MockSink : public ISink {
 public:
     explicit MockSink(std::shared_ptr<TestContext> ctx) : ctx_(ctx) {}
 
-    CudaError Save(const BatchData& batch, const BatchDetections& results) override {
+    CudaError Save(BatchData& batch, BatchDetections& results) override {
         ctx_->sinkCalls++;
 
         // Verify Sync logic

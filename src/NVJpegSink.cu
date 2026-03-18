@@ -76,7 +76,7 @@ NVJpegSink::~NVJpegSink() {
     }
 }
 
-CudaError NVJpegSink::Save(const BatchData& data, const BatchDetections& results) {
+CudaError NVJpegSink::Save(BatchData &data, BatchDetections &results) {
     if (data.readyEvent) {
         CUDA_TRY(cudaStreamWaitEvent(*cuda_stream_, *data.readyEvent, 0));
     }
@@ -84,19 +84,14 @@ CudaError NVJpegSink::Save(const BatchData& data, const BatchDetections& results
         CUDA_TRY(cudaStreamWaitEvent(*cuda_stream_, *results.readyEvent, 0));
     }
 
-    // Pointers for tracking
-//    auto* detPtr = const_cast<DetectionRaw*>(reinterpret_cast<const DetectionRaw*>(results.data.data()));
-    auto* detPtr = const_cast<DetectionRaw*>(results.data.data());
-    int* countPtr = const_cast<int*>(results.counts.data());
-
     int stride = BatchDetections::MAX_DETECTIONS_PER_FRAME;
 
     // Run Tracking (Sequential per frame in batch)
     for (int i = 0; i < data.batchSize; ++i) {
         CUDA_TRY(tracker_->ProcessBatch(
             i,
-            detPtr,
-            countPtr,
+            results.data,
+            results.counts,
             stride,
             (int)data.width,
             (int)data.height,
@@ -107,21 +102,12 @@ CudaError NVJpegSink::Save(const BatchData& data, const BatchDetections& results
     CUDA_TRY(tracker_->Compact(*cuda_stream_));
 
     // Run Annotation
-    float* imgPtr = const_cast<float*>(data.deviceData.data());
-//    std::cout << "Detection counts size: " << results.counts.size() << std::endl;
-//    std::vector<int> host_counts;
-//    CUDA_TRY(results.counts.to_vector(host_counts,*cuda_stream_));
-//    std::cout << "Detection counts: ";
-//    for (int i = 0; i < host_counts.size(); ++i) {
-//        std::cout << host_counts[i] << " " ;
-//    }
-//    std::cout << std::endl;
     CUDA_TRY(tracker_->Annotate(
-        imgPtr,
+        data.deviceData,
         data.batchSize,
         data.width, data.height,
-        detPtr,
-        countPtr,
+        results.data,
+        results.counts,
         *cuda_stream_
         ));
 
@@ -155,10 +141,10 @@ CudaError NVJpegSink::Save(const BatchData& data, const BatchDetections& results
     }
 
     // Retrieve Bitstream Sizes
-    std::vector<size_t> lengths(data.batchSize);
+    std::vector<size_t> lengths(data.batchSize, 0);
     for (int i = 0; i < data.batchSize; ++i) {
         CUDA_TRY(nvjpegEncodeRetrieveBitstream(nvjpeg_handle_, encoder_states_[i],
-                                               NULL, &lengths[i], *cuda_stream_));
+                                               nullptr, &lengths[i], *cuda_stream_));
     }
 
     CUDA_TRY(cudaStreamSynchronize(*cuda_stream_));

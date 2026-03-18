@@ -54,11 +54,9 @@ TEST_F(NVJpegSinkTest, KernelFloatToUint8Conversion) {
     Block<float> d_src;
     Block<uint8_t> d_dst;
 
-    ASSERT_CUDA_SUCCESS(d_src.resize(count));
     ASSERT_CUDA_SUCCESS(d_dst.resize(count));
-
+    ASSERT_CUDA_SUCCESS(d_src.assign(h_src));
     // Copy to GPU
-    cudaMemcpy(d_src.data(), h_src.data(), count * sizeof(float), cudaMemcpyHostToDevice);
 
     // Run Kernel
     ASSERT_CUDA_SUCCESS(FloatToUint8(d_src.data(), d_dst.data(), count));
@@ -67,8 +65,8 @@ TEST_F(NVJpegSinkTest, KernelFloatToUint8Conversion) {
     cudaDeviceSynchronize();
 
     // Copy back
-    std::vector<uint8_t> h_dst(count);
-    cudaMemcpy(h_dst.data(), d_dst.data(), count * sizeof(uint8_t), cudaMemcpyDeviceToHost);
+    std::vector<uint8_t> h_dst;
+    ASSERT_CUDA_SUCCESS(d_dst.to_vector(h_dst));
 
     // Verify
     // -0.5 -> 0
@@ -135,8 +133,8 @@ TEST_F(NVJpegSinkTest, SaveBatchToJpeg) {
             }
         }
     }
-    cudaMemcpy(data->deviceData.data(), hostImg.data(), hostImg.size() * sizeof(float), cudaMemcpyHostToDevice);
-    
+    ASSERT_CUDA_SUCCESS(data->deviceData.assign(hostImg));
+
     // Set IDs
     data->sourceIdentifiers = {"img_A", "img_B"};
     
@@ -145,7 +143,7 @@ TEST_F(NVJpegSinkTest, SaveBatchToJpeg) {
     ASSERT_CUDA_SUCCESS(BatchDetections::Create(results, batchSize));
     
     // Need to initialize counts to 0 to prevent tracker reading garbage
-    cudaMemset(results->counts.data(), 0, batchSize * sizeof(int));
+    ASSERT_CUDA_SUCCESS(results->counts.fill(0, 0));
 
     // Signal events (simulating pipeline completion)
     cudaEventRecord(*data->readyEvent, 0);
@@ -181,11 +179,11 @@ TEST_F(NVJpegSinkTest, HandleLargeImages) {
     ASSERT_CUDA_SUCCESS(BatchData::Create(data, 1, 1, w, h));
     
     // Initialize to grey
-    cudaMemset(data->deviceData.data(), 0, data->deviceData.size() * sizeof(float));
+    ASSERT_CUDA_SUCCESS(data->deviceData.fill(0, 0));
 
     std::shared_ptr<BatchDetections> results;
     ASSERT_CUDA_SUCCESS(BatchDetections::Create(results, 1));
-    cudaMemset(results->counts.data(), 0, sizeof(int));
+    ASSERT_CUDA_SUCCESS(results->counts.fill(0, 0));
 
     // Signal events
     cudaEventRecord(*data->readyEvent, 0);

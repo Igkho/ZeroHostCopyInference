@@ -67,8 +67,7 @@ CudaError StubDetector::Detect(const BatchData& input, BatchDetections& output) 
 
     // 3. "Run" Stub Inference
     // Just zero out the memory to simulate processing and ensure clean state
-//    CUDA_TRY(cudaMemsetAsync(res.data.data(), 0, bytesNeeded, *cuda_stream_));
-    CUDA_TRY(cudaMemsetAsync(res.counts.data(), 0, input.batchSize * sizeof(int), *cuda_stream_));
+    CUDA_TRY(res.counts.fill(0, *cuda_stream_));
 
     // 4. Record Completion
     CUDA_TRY(cudaEventRecord(*res.readyEvent, *cuda_stream_));

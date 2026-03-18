@@ -32,8 +32,8 @@ public:
 
     // Updates state based on detections
     CudaError ProcessBatch(int batchIndex,
-                           DetectionRaw* detections,
-                           int* countBuffer,
+                           BoundaryTypedBlock<DetectionRaw>& detections,
+                           BoundaryBlock<int>& countBuffer,
                            int maxDetections,
                            int width,
                            int height,
@@ -42,12 +42,12 @@ public:
     CudaError Compact(cudaStream_t stream);
 
     // Draws the current state (boxes + IDs) onto the image
-    CudaError Annotate(float* imageBatch, 
+    CudaError Annotate(Block<float>& imageBatch,
                        int batchSize, 
                        int width, 
-                       int height, 
-                       const DetectionRaw* detections, 
-                       const int* counts,
+                       int height,
+                       const BoundaryTypedBlock<DetectionRaw>& detections,
+                       const BoundaryBlock<int>& counts,
                        cudaStream_t stream);
 
 private:

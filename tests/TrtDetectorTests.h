@@ -112,7 +112,7 @@ TEST_F(TrtDetectorTest, DetectRunsEndToEnd) {
     ASSERT_CUDA_SUCCESS(BatchData::Create(input, 0, batchSize, props.inputWidth, props.inputHeight));
 
     // [FIX] Use ASSERT_EQ
-    ASSERT_EQ(cudaMemsetAsync(input->deviceData.data(), 0, input->deviceData.byte_size(), 0), cudaSuccess);
+    ASSERT_CUDA_SUCCESS(input->deviceData.fill(0, 0));
 
     if (input->readyEvent) cudaEventRecord(*input->readyEvent, 0);
 

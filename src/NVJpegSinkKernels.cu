@@ -32,7 +32,8 @@ CudaError FloatToUint8(const float* src,
     }
     KernelGrid grid(totalElements);
     FloatToUint8Kernel<<<grid.gsize(), grid.bsize(), 0, stream>>>(src, dst, totalElements);
-    return CudaError(ERROR_SOURCE, cudaGetLastError());
+    CUDA_CHECK_KERNEL(stream);
+    return CudaError(); //CudaError(ERROR_SOURCE, cudaGetLastError());
 }
 
 } // namespace cropandweed

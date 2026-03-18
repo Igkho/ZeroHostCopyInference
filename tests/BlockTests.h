@@ -264,7 +264,7 @@ TEST_F(BlockTest, LargeAllocation_Uint8) {
     // Allocate ~1MB
     size_t size = 1024 * 1024;
     // Fill with 0x00 is safe for memset
-    ASSERT_CUDA_SUCCESS(Block<uint8_t>::Create(block, size, 0));
+    ASSERT_CUDA_SUCCESS(Block<uint8_t>::Create(block, size, static_cast<uint8_t>(0)));
 
     EXPECT_EQ(block->size(), size);
     EXPECT_EQ(block->byte_size(), size);
@@ -409,6 +409,140 @@ TEST_F(BlockTest, AsyncPinnedMemoryCompatibility) {
 
     EXPECT_EQ(out.size(), 100);
     EXPECT_EQ(out[99], 0xAA);
+}
+
+// [UPDATE] Added explicit coverage for the TypedBlock<T> type-safe adapter
+TEST_F(BlockTest, TypedBlock_LifecycleAndSizing) {
+    TypedBlock<float> tb;
+    EXPECT_EQ(tb.size(), 0);
+    EXPECT_EQ(tb.capacity(), 0);
+
+    // Resize by element count, not bytes
+    ASSERT_CUDA_SUCCESS(tb.resize(100));
+    EXPECT_EQ(tb.size(), 100);
+    EXPECT_EQ(tb.byte_size(), 100 * sizeof(float));
+    EXPECT_GE(tb.capacity(), 100);
+
+    // Reserve additional capacity
+    ASSERT_CUDA_SUCCESS(tb.reserve(200));
+    EXPECT_EQ(tb.size(), 100);
+    EXPECT_GE(tb.capacity(), 200);
+}
+
+// [UPDATE] Verify type-safe Host <-> Device data transfer logic
+TEST_F(BlockTest, TypedBlock_DataTransfer) {
+    std::vector<int> host_in = {42, 73, 108};
+    TypedBlock<int> tb;
+
+    ASSERT_CUDA_SUCCESS(tb.assign(host_in));
+    EXPECT_EQ(tb.size(), 3);
+    EXPECT_NE(tb.data(), nullptr);
+
+    std::vector<int> host_out;
+    ASSERT_CUDA_SUCCESS(tb.to_vector(host_out)); // Implicitly synchronizes
+    EXPECT_EQ(host_in, host_out);
+}
+
+// [UPDATE] Guarantee move semantics don't leak or leave dangling raw pointers
+TEST_F(BlockTest, TypedBlock_MoveSemantics) {
+    std::vector<double> data = {1.1, 2.2, 3.3};
+    TypedBlock<double> src;
+    ASSERT_CUDA_SUCCESS(src.assign(data));
+
+    double* original_ptr = src.data();
+
+    // Move construct
+    TypedBlock<double> dst(std::move(src));
+    EXPECT_EQ(src.size(), 0);
+    EXPECT_EQ(src.data(), nullptr);
+    EXPECT_EQ(dst.size(), 3);
+    EXPECT_EQ(dst.data(), original_ptr);
+
+    // Move assignment
+    TypedBlock<double> dst2;
+    dst2 = std::move(dst);
+    EXPECT_EQ(dst.data(), nullptr);
+    EXPECT_EQ(dst2.data(), original_ptr);
+}
+
+// [UPDATE] Validate raw byte-block access for specialized casting scenarios
+TEST_F(BlockTest, TypedBlock_RawBlockAccess) {
+    TypedBlock<int> tb;
+    ASSERT_CUDA_SUCCESS(tb.resize(10));
+
+    Block<uint8_t>& raw = tb.raw();
+    EXPECT_EQ(raw.size(), 10 * sizeof(int));
+    EXPECT_EQ((void*)raw.data(), (void*)tb.data());
+}
+
+// [UPDATE] Test previously uncovered iterator and element access operators
+TEST_F(BlockTest, Block_IteratorsAndElementAccess) {
+    std::vector<int> data = {10, 20, 30};
+    std::unique_ptr<Block<int, MemoryType::Pinned>> pinned_block;
+    ASSERT_CUDA_SUCCESS((Block<int, MemoryType::Pinned>::Create(pinned_block, data)));
+
+    // Since it's pinned, host can safely access the pointers directly
+    EXPECT_EQ((*pinned_block)[0], 10);
+    EXPECT_EQ((*pinned_block)[2], 30);
+
+    // Test Iterator arithmetic
+    EXPECT_EQ(std::distance(pinned_block->begin(), pinned_block->end()), 3);
+    EXPECT_EQ(std::distance(pinned_block->cbegin(), pinned_block->cend()), 3);
+
+    int sum = 0;
+    for (auto it = pinned_block->begin(); it != pinned_block->end(); ++it) {
+        sum += *it;
+    }
+    EXPECT_EQ(sum, 60);
+}
+
+// Verifies that resize with a value acts as a bulk fill
+TEST_F(BlockTest, ResizeActsAsBulkFill) {
+    std::unique_ptr<Block<int>> block;
+    ASSERT_CUDA_SUCCESS(Block<int>::Create(block, 0));
+
+    // Resize to 5 and fill with 42
+    ASSERT_CUDA_SUCCESS(block->resize(5, 42));
+
+    std::vector<int> out;
+    ASSERT_CUDA_SUCCESS(block->to_vector(out));
+    for (int v : out) {
+        EXPECT_EQ(v, 42);
+    }
+}
+
+// Verifies that host-accessible memory types can be accessed directly
+TEST_F(BlockTest, DirectAccess_PinnedMemory) {
+    std::unique_ptr<Block<float, MemoryType::Pinned>> block;
+    ASSERT_CUDA_SUCCESS((Block<float, MemoryType::Pinned>::Create(block, 3, 0.0f)));
+
+    // Directly access and mutate via host pointer
+    float* host_ptr = block->data();
+    host_ptr[1] = 3.14f;
+
+    // Verify via the const accessor
+    EXPECT_FLOAT_EQ((*block)[1], 3.14f);
+}
+
+TEST_F(BlockTest, TypedBlock_FillZero) {
+    std::unique_ptr<CudaStream> streamPtr;
+    ASSERT_CUDA_SUCCESS(CudaStream::Create(streamPtr));
+    cudaStream_t stream = *streamPtr;
+
+    std::vector<float> initial_data = {1.5f, 2.5f, 3.5f, 4.5f};
+    TypedBlock<float> tb;
+    ASSERT_CUDA_SUCCESS(tb.assign(initial_data, stream));
+
+    // Execute zero-fill
+    ASSERT_CUDA_SUCCESS(tb.fill_zero(stream));
+
+    std::vector<float> out;
+    ASSERT_CUDA_SUCCESS(tb.to_vector(out, stream));
+
+    EXPECT_EQ(out.size(), 4);
+    for (float v : out) {
+        EXPECT_FLOAT_EQ(v, 0.0f);
+    }
 }
 
 } // namespace cropandweed

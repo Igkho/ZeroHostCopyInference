@@ -92,6 +92,7 @@ CudaError FFmpegSource::Init() {
         return CudaError(ERROR_SOURCE, "Failed to allocate codec context");
     }
     avcodec_parameters_to_context(decCtx_, fmtCtx_->streams[streamIndex_]->codecpar);
+
     decCtx_->hw_device_ctx = av_buffer_ref(hwDeviceCtx_);
 
     if (avcodec_open2(decCtx_, decoder, nullptr) < 0) {
@@ -106,11 +107,6 @@ CudaError FFmpegSource::Init() {
 
     return CudaError();
 }
-
-// void FFmpegSource::SetOutputSize(size_t width, size_t height) {
-//     targetW_ = width;
-//     targetH_ = height;
-// }
 
 CudaError FFmpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, bool &process) {
     if (finished_ && !flushing_) {
@@ -146,7 +142,6 @@ CudaError FFmpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, bool
                 int actualH = gpuFrame_->height;
 
                 float* batchBasePtr = outBatch.deviceData.data();
- //               size_t frameOffsetFloats = (size_t)framesCollected * (outW * outH * 3);
 
                 CUDA_TRY(cudaStreamSynchronize(0));
 

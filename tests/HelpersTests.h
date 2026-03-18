@@ -3,6 +3,10 @@
 #include <memory>
 #include <cuda_runtime.h>
 #include "helpers.h"
+#include <thread>
+#include <vector>
+#include <mutex>
+#include <sstream>
 
 namespace cropandweed {
 
@@ -33,7 +37,7 @@ TEST(CudaErrorTest, ReportsCudaFailure) {
 TEST(CudaErrorTest, ReportsNvjpegFailure) {
     nvjpegStatus_t raw_err = NVJPEG_STATUS_INTERNAL_ERROR;
     EXPECT_TRUE(CudaError::IsFailure(raw_err));
-    EXPECT_EQ(CudaError::GetErrorString(raw_err), "Internal Error");
+    EXPECT_STREQ(CudaError::GetErrorString(raw_err), "Internal Error");
 }
 
 TEST(CudaErrorTest, ErrorChaining) {
@@ -55,6 +59,22 @@ TEST(CudaErrorTest, ReportsStringFailure) {
     
     EXPECT_TRUE(CudaError::IsFailure(err));
     EXPECT_NE(err.Text().find(msg), std::string::npos);
+}
+
+// Validate std::string overloads for custom logical pipeline errors
+TEST(CudaErrorTest, StringFailureLogic) {
+    // Tests the CudaError overloads that handle raw std::strings
+    std::string err_msg = "Pipeline Context Poisoned";
+    std::string empty_msg = "";
+
+    EXPECT_TRUE(CudaError::IsFailure(err_msg))
+        << "Populated strings must be evaluated as failures.";
+
+    EXPECT_FALSE(CudaError::IsFailure(empty_msg))
+        << "Empty strings must be evaluated as success (no error).";
+
+    // Cast to std::string to ensure safe comparison whether GetErrorString returns const char* or std::string
+    EXPECT_EQ(std::string(CudaError::GetErrorString(err_msg)), err_msg);
 }
 
 // --- 2. CudaStream Tests ---
@@ -303,6 +323,140 @@ TEST(KernelGridTest, 3DCalculation) {
     
     KernelGrid grid(size, block);
     EXPECT_EQ(grid.gsize().z, 10); // 100 / 10 = 10
+}
+
+// Compile-time verification of the custom SFINAE shared_ptr trait
+TEST(HelpersTest, TypeTraitsSFINAE) {
+    // Should evaluate to false for raw pointers and unique_ptrs
+    static_assert(!is_shared_ptr_v<int*>, "Raw pointer is not shared_ptr");
+    static_assert(!is_shared_ptr_v<std::unique_ptr<int>>, "unique_ptr is not shared_ptr");
+
+    // Should evaluate to true for shared_ptr variants
+    static_assert(is_shared_ptr_v<std::shared_ptr<int>>, "shared_ptr type trait failed");
+    static_assert(is_shared_ptr_v<const std::shared_ptr<float>>, "const shared_ptr type trait failed");
+}
+
+// Verify that CUDA_TRY correctly forces an early return on failure
+TEST(HelpersTest, MacroControlFlow_CudaTry) {
+    auto dummy_func = [](bool force_fail) -> CudaError {
+        cudaError_t test_err = force_fail ? cudaErrorInvalidValue : cudaSuccess;
+
+        // If force_fail is true, CUDA_TRY will return immediately here.
+        CUDA_TRY(test_err);
+
+        // This should only be reached if force_fail is false.
+        return CudaError("MacroControlFlow", "Reached End");
+    };
+
+    // Test Success Path
+    CudaError err_success = dummy_func(false);
+    EXPECT_TRUE(CudaError::IsFailure(err_success)); // It returns the custom "Reached End" string error
+    EXPECT_NE(err_success.Text().find("Reached End"), std::string::npos);
+
+    // Test Early Return Path
+    CudaError err_fail = dummy_func(true);
+    EXPECT_TRUE(CudaError::IsFailure(err_fail));
+    EXPECT_EQ(err_fail.Text().find("Reached End"), std::string::npos); // Did not reach the end
+    EXPECT_NE(err_fail.Text().find("invalid argument"), std::string::npos); // CUDA error msg
+}
+
+// Verify CUDA_CALL_NO_THROW does not violate noexcept guarantees.
+TEST(HelpersTest, MacroControlFlow_CudaCallNoThrow) {
+    auto no_throw_wrapper = [](bool force_fail) noexcept {
+        cudaError_t test_err = force_fail ? cudaErrorInvalidValue : cudaSuccess;
+        // This macro must swallow the error internally. If it throws, the test framework
+        // or the runtime will catch a std::terminate.
+        CUDA_CALL_NO_THROW(test_err);
+    };
+
+    EXPECT_NO_THROW(no_throw_wrapper(false)) << "Should succeed silently.";
+    EXPECT_NO_THROW(no_throw_wrapper(true)) << "Must trap the exception and prevent std::terminate.";
+}
+
+// Verify CUDA_GENERAL_ERROR properly injects source file tracing.
+TEST(HelpersTest, MacroControlFlow_GeneralError) {
+    auto logic_check = [](bool condition) -> CudaError {
+        if (!condition) {
+            CUDA_GENERAL_ERROR("Validation Failed");
+        }
+        return CudaError();
+    };
+
+    CudaError err = logic_check(false);
+    EXPECT_TRUE(CudaError::IsFailure(err));
+
+    std::string err_text = err.Text();
+    EXPECT_NE(err_text.find("Validation Failed"), std::string::npos);
+    // Ensure the ERROR_SOURCE macro expanded correctly to capture the file name
+    EXPECT_NE(err_text.find("HelpersTests.h"), std::string::npos)
+        << "Error stack must contain the origin file name.";
+}
+
+// Validate thread-safety and driver isolation for RAII stream generation.
+TEST(HelpersTest, Concurrency_MultithreadedStreamCreation) {
+    const int num_threads = 16;
+    const int streams_per_thread = 50;
+    std::vector<std::thread> workers;
+    std::atomic<int> success_count{0};
+
+    auto worker_task = [&]() {
+        int local_success = 0;
+        for (int i = 0; i < streams_per_thread; ++i) {
+            std::unique_ptr<CudaStream> stream;
+            CudaError err = CudaStream::Create(stream, cudaStreamNonBlocking);
+
+            if (!CudaError::IsFailure(err) && stream != nullptr && *stream != nullptr) {
+                // Perform a lightweight query to ensure the handle is valid in this thread context
+                if (cudaStreamQuery(*stream) == cudaSuccess) {
+                    local_success++;
+                }
+            }
+            // stream unique_ptr goes out of scope here, invoking ~CudaStream() safely
+        }
+        success_count += local_success;
+    };
+
+    for (int i = 0; i < num_threads; ++i) {
+        workers.emplace_back(worker_task);
+    }
+
+    for (auto& t : workers) {
+        t.join();
+    }
+
+    // Verify all streams were created, queried, and destroyed without driver collisions
+    EXPECT_EQ(success_count.load(), num_threads * streams_per_thread);
+}
+
+// Validate thread-safety for RAII event generation.
+TEST(HelpersTest, Concurrency_MultithreadedEventCreation) {
+    const int num_threads = 16;
+    const int events_per_thread = 50;
+    std::vector<std::thread> workers;
+    std::atomic<int> success_count{0};
+
+    auto worker_task = [&]() {
+        int local_success = 0;
+        for (int i = 0; i < events_per_thread; ++i) {
+            std::unique_ptr<CudaEvent> event;
+            CudaError err = CudaEvent::Create(event, cudaEventDisableTiming);
+
+            if (!CudaError::IsFailure(err) && event != nullptr && *event != nullptr) {
+                local_success++;
+            }
+        }
+        success_count += local_success;
+    };
+
+    for (int i = 0; i < num_threads; ++i) {
+        workers.emplace_back(worker_task);
+    }
+
+    for (auto& t : workers) {
+        t.join();
+    }
+
+    EXPECT_EQ(success_count.load(), num_threads * events_per_thread);
 }
 
 } // namespace cropandweed

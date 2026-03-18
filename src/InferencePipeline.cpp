@@ -116,6 +116,10 @@ void InferencePipeline::inferenceWorker() {
                 std::cerr << "Pipeline Detector Error: " << e.what() << std::endl;
                 running_ = false; // Stop pipeline on detector failure
                 return;
+            } catch (...) {
+                std::cerr << "Pipeline Detector Error: UNKNOWN PROPRIETARY EXCEPTION THROWN!" << std::endl;
+                running_ = false;
+                return;
             }
         }
     }
@@ -137,6 +141,8 @@ void InferencePipeline::outputWorker() {
             } catch (const std::exception& e) {
                 // Log but don't necessarily kill the pipeline for one bad frame save
                 std::cerr << "Pipeline Sink Error: " << e.what() << std::endl;
+            } catch (...) {
+                std::cerr << "Pipeline Sink Error: UNKNOWN PROPRIETARY EXCEPTION THROWN!" << std::endl;
             }
             // Recycle Input
             recycleQueue_.Push(std::move(item.first));

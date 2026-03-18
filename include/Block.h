@@ -2,6 +2,7 @@
 #include <vector>
 #include <cuda_runtime_api.h>
 #include <memory>
+#include <cstring>
 #include "helpers.h"
 
 namespace cropandweed {
@@ -11,6 +12,42 @@ enum class MemoryType {
     Pinned,     // Host Pinned (staging for transfers on RTX)
     ZeroCopy    // Mapped Memory (CPU/GPU share pointer - Best for Jetson I/O)
 };
+
+// --- Architectural Memory Intent ---
+// BoundaryMemType:
+// Data bridging the compute boundary. Primarily generated and used by the GPU,
+// but requires lightweight or occasional reads by the CPU (e.g., detection counts, bounding boxes).
+//
+// HostStagingMemType:
+// Data whose gravity sits with the CPU for heavy I/O operations (e.g., writing JPEGs to disk).
+// Provides a high-bandwidth lane for the GPU to receive or deliver bulk data.
+
+#ifdef PLATFORM_JETSON
+
+// --- Jetson Implementation (Unified Memory Architecture) ---
+// Because the ARM CPU and GPU physically share the same RAM chips,
+// MemoryType::ZeroCopy (cudaHostAllocMapped) is the optimal realization for both intents.
+// It maps physical pages into both virtual address spaces, allowing direct pointer
+// dereferencing by either processor without triggering redundant memory-to-memory copies.
+
+constexpr MemoryType BoundaryMemType = MemoryType::ZeroCopy;
+constexpr MemoryType HostStagingMemType = MemoryType::ZeroCopy;
+
+#else
+
+// --- PC Implementation (Discrete GPU over PCIe Bus) ---
+// The CPU and GPU possess physically isolated memory banks separated by the PCIe bus.
+
+// Pure VRAM is the fastest realization for GPU math. The data stays isolated
+// on the GPU until the CPU explicitly requests a transfer across the boundary.
+constexpr MemoryType BoundaryMemType = MemoryType::Device;
+
+// Page-locked system RAM is the optimal realization for heavy CPU I/O.
+// It prevents OS memory swapping, allowing the GPU's DMA controller to saturate
+// the PCIe bus bandwidth during bulk transfers.
+constexpr MemoryType HostStagingMemType = MemoryType::Pinned;
+
+#endif
 
 /**
  * @brief A class for storing consecutive elements of type T in the device memory.
@@ -51,7 +88,7 @@ public:
     static CudaError Create(std::unique_ptr<Block<T, MemType>>& out, size_t size, cudaStream_t stream = 0);
 
     //! Factory method. Creates a new block of size elements length and fills all bytes of memory with val.
-    static CudaError Create(std::unique_ptr<Block<T, MemType>>& out, size_t size, int val, cudaStream_t stream = 0);
+    static CudaError Create(std::unique_ptr<Block<T, MemType>>& out, size_t size, T val, cudaStream_t stream = 0);
 
     //! Factory method. Creates a new block from the host vector.
     static CudaError Create(std::unique_ptr<Block<T, MemType>>& out, const std::vector<T>& data, cudaStream_t stream = 0);
@@ -87,14 +124,18 @@ public:
     //! If the current size is greater than new_size, the block is reduced to its first new_size elements.
     //! If the current size is less than new_size, then additional elements are appended.
     //! Every byte of memory for the appended elements is filled with val
-    CudaError resize(size_t new_size, int val, cudaStream_t stream = 0);
+    CudaError resize(size_t new_size, T val, cudaStream_t stream = 0);
+
+    //! Fills all initialized elements (from 0 to size()) with the given value.
+    CudaError fill(T val, cudaStream_t stream = 0);
 
     //! Erases all elements from the container. After this call, size() returns zero.
     //! Leaves the capacity() of the block unchanged
-    void clear() noexcept;
+    __host__ __device__ void clear() noexcept;
 
     //! Exchanges the contents and capacity of the container with those of other
     void swap(Block<T, MemType> &other);
+
 
     // --- 5. Accessors ---
 
@@ -164,13 +205,16 @@ private:
     //! If possible (the size of a host vector is enough) copies the data from this block to other host vector.
     //! No memory allocations are made. Assumes output vector is already resized.
     CudaError copy_to(std::vector<T> &other, cudaStream_t stream) const;
+
+    //! Fills elements from `offset` up to `size_`. Does no bounds checking.
+    CudaError fill_back(size_t offset, T val, cudaStream_t stream);
 };
 
 // Header-only adapter for type safety without template instantiation
-template <typename T>
+template <typename T, MemoryType MemType = MemoryType::Device>
 class TypedBlock {
 private:
-    Block<uint8_t> raw_; // Underlying storage
+    Block<uint8_t, MemType> raw_; // Underlying storage
 
 public:
     TypedBlock() = default;
@@ -197,14 +241,23 @@ public:
         return raw_.reserve(count * sizeof(T), stream);
     }
 
+    CudaError fill_zero(cudaStream_t stream = 0) {
+        return raw_.fill(0, stream);
+    }
+
     // Assign from host vector
     CudaError assign(const std::vector<T>& other, cudaStream_t stream = 0) {
         size_t totalBytes = other.size() * sizeof(T);
         CUDA_TRY(raw_.resize(totalBytes, stream));
         if (totalBytes > 0) {
-            // Reinterpret cast logic handled implicitly by void* in memcpy
-            CUDA_TRY(cudaMemcpyAsync(raw_.data(), other.data(),
-                                     totalBytes, cudaMemcpyHostToDevice, stream));
+            if constexpr (MemType == MemoryType::Device) {
+                CUDA_TRY(cudaMemcpyAsync(raw_.data(), other.data(),
+                                         totalBytes, cudaMemcpyHostToDevice, stream));
+                CUDA_TRY(cudaStreamSynchronize(stream));
+            } else {
+                CUDA_TRY(cudaStreamSynchronize(stream));
+                std::memcpy(raw_.data(), other.data(), totalBytes);
+            }
         }
         return CudaError();
     }
@@ -215,24 +268,37 @@ public:
         out.resize(count);
         if (count > 0) {
             size_t totalBytes = count * sizeof(T);
-            CUDA_TRY(cudaMemcpyAsync(out.data(), raw_.data(),
-                                     totalBytes, cudaMemcpyDeviceToHost, stream));
-            // Synchronize to ensure vector is ready for CPU use
-            CUDA_TRY(cudaStreamSynchronize(stream));
+            if constexpr (MemType == MemoryType::Device) {
+                CUDA_TRY(cudaMemcpyAsync(out.data(), raw_.data(),
+                                         totalBytes, cudaMemcpyDeviceToHost, stream));
+                CUDA_TRY(cudaStreamSynchronize(stream));
+            } else {
+                CUDA_TRY(cudaStreamSynchronize(stream));
+                std::memcpy(out.data(), raw_.data(), totalBytes);
+            }
         }
         return CudaError();
     }
 
     // Accessors
-    T* data() noexcept { return reinterpret_cast<T*>(raw_.data()); }
-    const T* data() const noexcept { return reinterpret_cast<const T*>(raw_.data()); }
+    __host__ __device__ T* data() noexcept { return reinterpret_cast<T*>(raw_.data()); }
+    __host__ __device__ const T* data() const noexcept { return reinterpret_cast<const T*>(raw_.data()); }
 
-    size_t size() const { return raw_.size() / sizeof(T); }
-    size_t byte_size() const { return raw_.byte_size(); }
-    size_t capacity() const { return raw_.capacity() / sizeof(T); }
-
+    __host__ __device__ size_t size() const { return raw_.size() / sizeof(T); }
+    __host__ __device__ size_t byte_size() const { return raw_.byte_size(); }
+    __host__ __device__ bool empty() const { return raw_.empty(); }
+    __host__ __device__ size_t capacity() const { return raw_.capacity() / sizeof(T); }
     // For specialized cases needing the raw byte block
-    Block<uint8_t>& raw() { return raw_; }
+    Block<uint8_t, MemType>& raw() { return raw_; }
 };
+
+template <typename T>
+using BoundaryBlock = Block<T, BoundaryMemType>;
+
+template <typename T>
+using BoundaryTypedBlock = TypedBlock<T, BoundaryMemType>;
+
+template <typename T>
+using HostStagingBlock = Block<T, HostStagingMemType>;
 
 } // namespace cropandweed

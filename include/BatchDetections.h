@@ -10,10 +10,8 @@ struct BatchDetections {
     static constexpr int MAX_DETECTIONS_PER_FRAME = 1000;
 
     // 1. Direct Block Members
-    // These behave like std::vector fields on the stack (fast access)
-//    Block<uint8_t> data;
-    TypedBlock<DetectionRaw> data;
-    Block<int> counts;
+    BoundaryTypedBlock<DetectionRaw> data;
+    BoundaryBlock<int> counts;
 
     // 2. Synchronization
     std::unique_ptr<CudaEvent> readyEvent;
