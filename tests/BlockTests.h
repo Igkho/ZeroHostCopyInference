@@ -411,7 +411,7 @@ TEST_F(BlockTest, AsyncPinnedMemoryCompatibility) {
     EXPECT_EQ(out[99], 0xAA);
 }
 
-// [UPDATE] Added explicit coverage for the TypedBlock<T> type-safe adapter
+// Added explicit coverage for the TypedBlock<T> type-safe adapter
 TEST_F(BlockTest, TypedBlock_LifecycleAndSizing) {
     TypedBlock<float> tb;
     EXPECT_EQ(tb.size(), 0);
@@ -429,7 +429,7 @@ TEST_F(BlockTest, TypedBlock_LifecycleAndSizing) {
     EXPECT_GE(tb.capacity(), 200);
 }
 
-// [UPDATE] Verify type-safe Host <-> Device data transfer logic
+// Verify type-safe Host <-> Device data transfer logic
 TEST_F(BlockTest, TypedBlock_DataTransfer) {
     std::vector<int> host_in = {42, 73, 108};
     TypedBlock<int> tb;
@@ -443,7 +443,7 @@ TEST_F(BlockTest, TypedBlock_DataTransfer) {
     EXPECT_EQ(host_in, host_out);
 }
 
-// [UPDATE] Guarantee move semantics don't leak or leave dangling raw pointers
+// Guarantee move semantics don't leak or leave dangling raw pointers
 TEST_F(BlockTest, TypedBlock_MoveSemantics) {
     std::vector<double> data = {1.1, 2.2, 3.3};
     TypedBlock<double> src;
@@ -465,7 +465,7 @@ TEST_F(BlockTest, TypedBlock_MoveSemantics) {
     EXPECT_EQ(dst2.data(), original_ptr);
 }
 
-// [UPDATE] Validate raw byte-block access for specialized casting scenarios
+// Validate raw byte-block access for specialized casting scenarios
 TEST_F(BlockTest, TypedBlock_RawBlockAccess) {
     TypedBlock<int> tb;
     ASSERT_CUDA_SUCCESS(tb.resize(10));
@@ -475,7 +475,7 @@ TEST_F(BlockTest, TypedBlock_RawBlockAccess) {
     EXPECT_EQ((void*)raw.data(), (void*)tb.data());
 }
 
-// [UPDATE] Test previously uncovered iterator and element access operators
+// Test previously uncovered iterator and element access operators
 TEST_F(BlockTest, Block_IteratorsAndElementAccess) {
     std::vector<int> data = {10, 20, 30};
     std::unique_ptr<Block<int, MemoryType::Pinned>> pinned_block;

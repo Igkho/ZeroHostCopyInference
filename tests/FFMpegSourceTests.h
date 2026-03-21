@@ -1,4 +1,9 @@
 #pragma once
+
+// Completely hide these tests from the compiler on Jetson
+// to prevent linker errors since FFmpegSource.cpp is excluded via CMake.
+#ifndef PLATFORM_JETSON
+
 #include <gtest/gtest.h>
 #include <memory>
 #include <string>
@@ -7,7 +12,7 @@
 #include <vector>
 #include <algorithm>
 #include "FFmpegSource.h"
-#include "FFmpegSourceKernels.h"
+#include "SourceKernels.h"
 #include "BatchData.h"
 #include "helpers.h"
 #include "Block.h"
@@ -34,7 +39,9 @@ protected:
         // 2. Resolve Path with Priority: Current Dir -> Relative Dir
         fs::path filenames[] = {
             "Moving.mp4",
-            fs::path("..") / "video" / "Moving.mp4"
+            fs::path("video") / "Moving.mp4",
+            fs::path("..") / "video" / "Moving.mp4",
+            fs::path("..") / "Moving.mp4"
         };
 
         for (const auto& p : filenames) {
@@ -128,6 +135,51 @@ TEST_F(FFmpegSourceTest, VerifyFrameCountAndEOS) {
 
     EXPECT_FALSE(process);
     EXPECT_NEAR(total_frames_read, 120, 2);
+}
+
+// Test verifying EOF padding and capacity
+TEST_F(FFmpegSourceTest, PartialBatchAtEOFZeroPadsTail) {
+    if (!video_available_) GTEST_SKIP() << "Moving.mp4 not found.";
+
+    int targetW = 64;
+    int targetH = 64;
+    std::unique_ptr<ISource> source;
+    ASSERT_CUDA_SUCCESS(FFmpegSource::Create(source, video_path_.string(), targetW, targetH));
+
+    BatchData batch;
+    // Request an abnormally large batch to quickly hit EOF and force a partial chunk
+    size_t reqBatchSize = 100;
+    bool process = true;
+
+    bool foundPartialBatch = false;
+
+    while (process) {
+        ASSERT_CUDA_SUCCESS(source->GetNextBatch(batch, reqBatchSize, process));
+
+        if (process && batch.batchSize < reqBatchSize) {
+            foundPartialBatch = true;
+
+            // 1. Verify Capacity
+            size_t expectedTotalElements = reqBatchSize * targetW * targetH * 3;
+            EXPECT_EQ(batch.deviceData.size(), expectedTotalElements)
+                << "EOF partial batch must retain full requested capacity";
+
+            // 2. Verify Padding
+            if (batch.readyEvent) cudaEventSynchronize(*batch.readyEvent);
+            std::vector<float> hostData;
+            ASSERT_CUDA_SUCCESS(batch.deviceData.to_vector(hostData));
+
+            size_t validElements = batch.batchSize * targetW * targetH * 3;
+            double paddingSum = 0.0;
+            for (size_t i = validElements; i < expectedTotalElements; ++i) {
+                paddingSum += hostData[i];
+            }
+            EXPECT_DOUBLE_EQ(paddingSum, 0.0) << "EOF padding frames must be zero-filled";
+            break; // We found and verified the EOF batch, exit loop
+        }
+    }
+
+    EXPECT_TRUE(foundPartialBatch) << "Failed to generate a partial batch at EOF";
 }
 
 TEST_F(FFmpegSourceTest, VerifyRGBContent) {
@@ -244,3 +296,5 @@ TEST_F(FFmpegSourceKernelTest, GlobalMemoryImplementation) {
 }
 
 } // namespace cropandweed
+
+#endif // PLATFORM_JETSON

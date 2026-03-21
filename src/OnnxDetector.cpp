@@ -8,6 +8,8 @@ using namespace cropandweed;
 CudaError OnnxDetector::Init(const std::string& modelPath) {
     Ort::SessionOptions options;
     options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    // Explicitly force the session to only log ERROR (3) or FATAL (4)
+    options.SetLogSeverityLevel(3);
 
     CUDA_TRY(CudaStream::Create(cuda_stream_, cudaStreamNonBlocking));
 
@@ -125,6 +127,12 @@ CudaError OnnxDetector::Detect(const BatchData& input, BatchDetections &output) 
     if (input.readyEvent) {
         CUDA_TRY(cudaStreamWaitEvent(*cuda_stream_, *input.readyEvent, 0));
     }
+    int validBatchSize = input.batchSize;
+    // Derive the strict engine batch size from the padded input buffer capacity
+    int engineBatchSize = input.deviceData.size() / (input.width * input.height * 3);
+    if (engineBatchSize <= 0) {
+        engineBatchSize = validBatchSize;
+    }
 
     // Determine Shapes
     int channels = 84;
@@ -145,20 +153,20 @@ CudaError OnnxDetector::Detect(const BatchData& input, BatchDetections &output) 
         return CudaError(ERROR_SOURCE, std::string("ONNX Output Info Error: ") + e.what());
     }
 
-    int batchSize = input.batchSize;
+//    int batchSize = input.batchSize;
 
-    // Resize Buffers (Efficient Reuse)
-    CUDA_TRY(res.rawOutput.resize(batchSize * channels * anchors, *cuda_stream_));
+    // Raw CNN output must accommodate the full engine batch size
+    CUDA_TRY(res.rawOutput.resize(engineBatchSize * channels * anchors, *cuda_stream_));
 
-    CUDA_TRY(res.candidates.resize(batchSize * BatchDetections::MAX_DETECTIONS_PER_FRAME * 10,
+    // Candidates and Final Outputs only need to accommodate the valid frames
+    CUDA_TRY(res.candidates.resize(validBatchSize * BatchDetections::MAX_DETECTIONS_PER_FRAME * 10,
                                    *cuda_stream_));
-
     CUDA_TRY(res.candidateCount.resize(1, *cuda_stream_));
     CUDA_TRY(res.candidateCount.fill(0, *cuda_stream_));
 
-    CUDA_TRY(output.data.resize(batchSize * BatchDetections::MAX_DETECTIONS_PER_FRAME, *cuda_stream_));
+    CUDA_TRY(output.data.resize(validBatchSize * BatchDetections::MAX_DETECTIONS_PER_FRAME, *cuda_stream_));
 
-    CUDA_TRY(output.counts.resize(batchSize, *cuda_stream_));
+    CUDA_TRY(output.counts.resize(validBatchSize, *cuda_stream_));
     CUDA_TRY(output.counts.fill(0, *cuda_stream_));
 
     // Ensure Events exist
@@ -166,9 +174,9 @@ CudaError OnnxDetector::Detect(const BatchData& input, BatchDetections &output) 
         CUDA_TRY(CudaEvent::Create(output.readyEvent));
     }
     try {
-        // Setup Input Shape [Batch, 3, H, W]
+        // Setup Input Shape [engineBatchSize, 3, H, W]
         std::vector<int64_t> inputShape = {
-            (int64_t)batchSize, 3, (int64_t)input.height, (int64_t)input.width
+            (int64_t)engineBatchSize, 3, (int64_t)input.height, (int64_t)input.width
         };
 
         // Create Memory Info (Tells ORT the data is on GPU ID 0)
@@ -189,7 +197,7 @@ CudaError OnnxDetector::Detect(const BatchData& input, BatchDetections &output) 
 
         // Setup Output Binding
         std::vector<int64_t> outputShape = {
-            (int64_t)batchSize, (int64_t)channels, (int64_t)anchors
+            (int64_t)engineBatchSize, (int64_t)channels, (int64_t)anchors
         };
 
         Ort::Value outputTensor = Ort::Value::CreateTensor<float>(
@@ -209,12 +217,12 @@ CudaError OnnxDetector::Detect(const BatchData& input, BatchDetections &output) 
         return CudaError(ERROR_SOURCE, std::string("ONNX Inference Error: ") + e.what());
     }
 
-    // Post-Processing (Kernel)
+    // Post-Processing exclusively parses the validBatchSize slice. Padding is ignored.
     CUDA_TRY(DecodeAndFilter(
         res.rawOutput,
         res.candidates,
         res.candidateCount,
-        batchSize,
+        validBatchSize,
         anchors,
         channels - 4,
         0.25f, // Confidence Threshold
@@ -230,7 +238,7 @@ CudaError OnnxDetector::Detect(const BatchData& input, BatchDetections &output) 
         res.nmsMask,
         0.45f, // IOU threshold
         BatchDetections::MAX_DETECTIONS_PER_FRAME, // Stride
-        batchSize,
+        validBatchSize,
         *cuda_stream_
     ));
 

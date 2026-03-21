@@ -2,6 +2,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <filesystem>
 
 #include "CLI/CLI.hpp"
 
@@ -9,6 +10,7 @@
 #include "Block.h"
 #include "InferencePipeline.h"
 #include "FFmpegSource.h"
+#include "NVJpegSource.h"
 #include "Interfaces.h"
 #include "NVJpegSink.h"
 #include "PerformanceTimer.h"
@@ -18,7 +20,7 @@
 #include "TrtDetector.h"
 #include "ClassNamesReader.h"
 
-
+namespace fs = std::filesystem;
 using namespace cropandweed;
 
 enum class BackendType {
@@ -34,10 +36,10 @@ int main(int argc, char** argv) {
 
     app.set_version_flag("--version", std::string(TOOL_VERSION));
 
-    std::string videoPath;
-    app.add_option("-i,--input", videoPath, "Path to input video file")
+    std::string inputPath;
+    app.add_option("-i,--input", inputPath, "Path to input video file or image directory")
         ->required()
-        ->check(CLI::ExistingFile);
+        ->check(CLI::ExistingPath);
 
     std::string modelPath;
     app.add_option("-m,--model", modelPath, "Path to ONNX model file")
@@ -62,7 +64,8 @@ int main(int argc, char** argv) {
 
     int batchSize = 16;
     app.add_option("-b,--batch", batchSize, "Inference batch size")
-        ->default_val(16)->check(CLI::Range(1, (int)BatchData::MAX_BATCH_SIZE));
+        ->default_val(16)->check(CLI::Range((int)BatchData::MIN_BATCH_SIZE,
+                                            (int)BatchData::MAX_BATCH_SIZE));
 
     try {
         app.parse(argc, argv);
@@ -94,11 +97,19 @@ int main(int argc, char** argv) {
                 break;
 
             case BackendType::ONNX:
+#ifdef PLATFORM_JETSON
+                // Explicitly block ONNX on Jetson with a clean, helpful error
+                throw std::runtime_error("[Fatal Error] The ONNX Runtime GPU backend is not supported on Jetson architecture. "
+                "Please use the native TensorRT backend: '--backend trt'"
+                );
+#else
+                // PC Execution path
                 if (modelPath.empty()) {
                     throw std::runtime_error("ONNX backend requires --model argument");
                 }
                 std::cout << "[Main] Selected Backend: ONNX Runtime" << std::endl;
                 CUDA_CALL(OnnxDetector::Create(detector, modelPath));
+#endif
                 break;
 
             default:
@@ -130,7 +141,23 @@ int main(int argc, char** argv) {
 
         // Create Source
         std::unique_ptr<ISource> source;
-        CUDA_CALL(FFmpegSource::Create(source, videoPath, props.inputWidth, props.inputHeight))
+        if (fs::is_directory(inputPath)) {
+            std::cout << "[Main] Input is a directory. Initializing NVJpegSource..." << std::endl;
+            CUDA_CALL(NVJpegSource::Create(source, inputPath, props.inputWidth, props.inputHeight));
+        } else if (fs::is_regular_file(inputPath)) {
+            // Hardware-aware routing: Prevent Jetson from attempting unsupported NVDEC video decoding
+#ifdef PLATFORM_JETSON
+            throw std::runtime_error(
+                "Video decoding via FFmpeg is not supported on Jetson UMA architecture yet. "
+                "Please extract your video to a folder of separate JPEG frames and pass the folder path as --input."
+                );
+#else
+            std::cout << "[Main] Input is a file. Initializing FFmpegSource..." << std::endl;
+            CUDA_CALL(FFmpegSource::Create(source, inputPath, props.inputWidth, props.inputHeight));
+#endif
+        } else {
+            throw std::runtime_error("Input path is neither a regular file nor a directory.");
+        }
 
         // Create Sink
         std::unique_ptr<ISink> sink;

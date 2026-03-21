@@ -1,6 +1,6 @@
 #include "FFmpegSource.h"
 #include "helpers.h"
-#include "FFmpegSourceKernels.h"
+#include "SourceKernels.h"
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -207,6 +207,12 @@ CudaError FFmpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, bool
     }
 
     if (framesCollected > 0) {
+        // Zero-fill the padding frames at EOF so the CNN doesn't process stale recycled memory
+        if (framesCollected < batchSize) {
+            size_t frameFloats = outW * outH * 3;
+            size_t offset = framesCollected * frameFloats;
+            CUDA_TRY(outBatch.deviceData.fill_back(offset, 0.0f, *cuda_stream_));
+        }
         if (!outBatch.readyEvent) {
             CUDA_TRY(CudaEvent::Create(outBatch.readyEvent));
         }
@@ -220,7 +226,7 @@ CudaError FFmpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, bool
             CUDA_TRY(cudaEventRecord(*outBatch.readyEvent, *cuda_stream_)); // Retry
         } else {
             if (err != cudaSuccess) {
-            // Propagate other errors using your helper macro logic manually
+            // Propagate other errors manually
                 return CudaError(ERROR_SOURCE, err);
             }
         }

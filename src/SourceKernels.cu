@@ -1,4 +1,4 @@
-#include "FFmpegSourceKernels.h"
+#include "SourceKernels.h"
 #include "helpers.h"
 #include <algorithm>
 #include <cstring>
@@ -257,6 +257,92 @@ CudaError NV12ToRGBPlanar(
     }
 
     return CudaError(); //CudaError(ERROR_SOURCE, cudaGetLastError());
+}
+
+namespace {
+
+// Kernel to resize (Bilinear) and cast uint8_t image to normalized float[0..1] array
+__global__ void ResizeAndCastRGBPlanarKernel(
+    const uint8_t* __restrict__ srcR,
+    const uint8_t* __restrict__ srcG,
+    const uint8_t* __restrict__ srcB,
+    int srcW, int srcH, int srcPitch,
+    float* __restrict__ dstBase,
+    int dstW, int dstH)
+{
+    int dst_x = blockIdx.x * blockDim.x + threadIdx.x;
+    int dst_y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (dst_x >= dstW || dst_y >= dstH) return;
+
+    // Bilinear Interpolation Scales
+    float scale_x = (float)srcW / (float)dstW;
+    float scale_y = (float)srcH / (float)dstH;
+
+    // Centered pixel mapping
+    float src_fx = (dst_x + 0.5f) * scale_x - 0.5f;
+    float src_fy = (dst_y + 0.5f) * scale_y - 0.5f;
+
+    // Clamp to valid boundaries to prevent out-of-bounds reads
+    src_fx = fmaxf(0.0f, fminf(src_fx, (float)srcW - 1.001f));
+    src_fy = fmaxf(0.0f, fminf(src_fy, (float)srcH - 1.001f));
+
+    int x1 = (int)src_fx;
+    int y1 = (int)src_fy;
+    int x2 = min(x1 + 1, srcW - 1);
+    int y2 = min(y1 + 1, srcH - 1);
+
+    float dx = src_fx - x1;
+    float dy = src_fy - y1;
+
+    // Inline closure for bilinear math across arbitrary planes
+    auto bilerp = [&](const uint8_t* plane) {
+        float a = plane[y1 * srcPitch + x1];
+        float b = plane[y1 * srcPitch + x2];
+        float c = plane[y2 * srcPitch + x1];
+        float d = plane[y2 * srcPitch + x2];
+        return (1.0f - dx) * (1.0f - dy) * a +
+               dx * (1.0f - dy) * b +
+               (1.0f - dx) * dy * c +
+               dx * dy * d;
+    };
+
+    // Calculate, cast, and normalize to 0.0 - 1.0 range
+    float r = bilerp(srcR) / 255.0f;
+    float g = bilerp(srcG) / 255.0f;
+    float b = bilerp(srcB) / 255.0f;
+
+    int planeSize = dstW * dstH;
+    int dst_idx = dst_y * dstW + dst_x;
+
+    // Write to coalesced memory layout (Planar format [RRR...GGG...BBB])
+    dstBase[dst_idx] = r;
+    dstBase[dst_idx + planeSize] = g;
+    dstBase[dst_idx + 2 * planeSize] = b;
+}
+
+} // anonymous namespace
+
+CudaError ResizeAndCastRGBPlanar(const uint8_t* srcR,
+                                 const uint8_t* srcG,
+                                 const uint8_t* srcB,
+                                 int srcW, int srcH, int srcPitch,
+                                 float* dstBase, int dstW, int dstH,
+                                 cudaStream_t stream)
+{
+    // Defensive barrier
+    if (!srcR || !srcG || !srcB || !dstBase || srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0 || srcPitch <= 0) {
+        return CudaError(ERROR_SOURCE, "Invalid arguments to ResizeAndCastRGBPlanar");
+    }
+
+    KernelGrid grid({(unsigned int)dstW, (unsigned int)dstH}, {16, 16});
+
+    ResizeAndCastRGBPlanarKernel<<<grid.gsize(), grid.bsize(), 0, stream>>>(
+        srcR, srcG, srcB, srcW, srcH, srcPitch, dstBase, dstW, dstH
+        );
+    CUDA_CHECK_KERNEL(stream);
+
+    return CudaError();
 }
 
 } // namespace cropandweed

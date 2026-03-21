@@ -151,6 +151,7 @@ TEST_F(NVJpegSinkTest, SaveBatchToJpeg) {
 
     // 4. Run Save
     ASSERT_CUDA_SUCCESS(sink->Save(*data, *results));
+    ASSERT_CUDA_SUCCESS(sink->Close());
 
     // 5. Verification
     fs::path file1 = output_dir_ / "frame_img_A.jpg";
@@ -190,12 +191,100 @@ TEST_F(NVJpegSinkTest, HandleLargeImages) {
     cudaEventRecord(*results->readyEvent, 0);
 
     ASSERT_CUDA_SUCCESS(sink->Save(*data, *results));
+    ASSERT_CUDA_SUCCESS(sink->Close());
 
     // Check output
     // If IDs are missing, default naming is used: frame_{ID}.jpg
     // BatchId=1, Index=0 -> frame_0001.jpg (since 1 * 1 + 0 = 1)
     fs::path file = output_dir_ / "frame_0001.jpg";
     EXPECT_TRUE(fs::exists(file));
+}
+
+// ==========================================
+// 4. Advanced Architecture & State Machine Tests
+// ==========================================
+
+TEST_F(NVJpegSinkTest, VerifiesDoubleBufferedDeferral) {
+    size_t w = 64;
+    size_t h = 64;
+
+    std::unique_ptr<ISink> sink;
+    ASSERT_CUDA_SUCCESS(NVJpegSink::Create(sink, output_dir_.string(), {w, h, 3, {"", "", ""}}));
+
+    std::shared_ptr<BatchData> data1;
+    ASSERT_CUDA_SUCCESS(BatchData::Create(data1, 1, 1, w, h));
+    ASSERT_CUDA_SUCCESS(data1->deviceData.fill(0, 0));
+    data1->sourceIdentifiers = {"batch1_img"};
+    cudaEventRecord(*data1->readyEvent, 0);
+
+    std::shared_ptr<BatchDetections> results;
+    ASSERT_CUDA_SUCCESS(BatchDetections::Create(results, 1));
+    ASSERT_CUDA_SUCCESS(results->counts.fill(0, 0));
+    cudaEventRecord(*results->readyEvent, 0);
+
+    // 1. Send first batch
+    ASSERT_CUDA_SUCCESS(sink->Save(*data1, *results));
+
+    // Verify it is DEFERRED
+    fs::path file1 = output_dir_ / "frame_batch1_img.jpg";
+    EXPECT_FALSE(fs::exists(file1)) << "Batch 1 was written synchronously instead of being deferred!";
+
+    // 2. Prepare second batch
+    std::shared_ptr<BatchData> data2;
+    ASSERT_CUDA_SUCCESS(BatchData::Create(data2, 2, 1, w, h));
+    ASSERT_CUDA_SUCCESS(data2->deviceData.fill(0, 0));
+    data2->sourceIdentifiers = {"batch2_img"};
+    cudaEventRecord(*data2->readyEvent, 0);
+
+    // 3. Send second batch. This must trigger the flush of data1.
+    ASSERT_CUDA_SUCCESS(sink->Save(*data2, *results));
+
+    // Verify Batch 1 is now written, but Batch 2 is still deferred
+    EXPECT_TRUE(fs::exists(file1)) << "Batch 2 failed to trigger the N-1 flush for Batch 1.";
+
+    fs::path file2 = output_dir_ / "frame_batch2_img.jpg";
+    EXPECT_FALSE(fs::exists(file2)) << "Batch 2 was written synchronously!";
+
+    // 4. Explicit Close
+    ASSERT_CUDA_SUCCESS(sink->Close());
+
+    // Verify Batch 2 is finally written
+    EXPECT_TRUE(fs::exists(file2)) << "Close() failed to flush the final deferred batch.";
+}
+
+TEST_F(NVJpegSinkTest, DestructorFallbackSavesUnflushedData) {
+    size_t w = 64;
+    size_t h = 64;
+
+    std::shared_ptr<BatchData> data;
+    ASSERT_CUDA_SUCCESS(BatchData::Create(data, 1, 1, w, h));
+    ASSERT_CUDA_SUCCESS(data->deviceData.fill(0, 0));
+    data->sourceIdentifiers = {"destructor_test"};
+    cudaEventRecord(*data->readyEvent, 0);
+
+    std::shared_ptr<BatchDetections> results;
+    ASSERT_CUDA_SUCCESS(BatchDetections::Create(results, 1));
+    ASSERT_CUDA_SUCCESS(results->counts.fill(0, 0));
+    cudaEventRecord(*results->readyEvent, 0);
+
+    fs::path expected_file = output_dir_ / "frame_destructor_test.jpg";
+
+    {
+        // Scope the sink so we can force its destructor to run early
+        std::unique_ptr<ISink> sink;
+        ASSERT_CUDA_SUCCESS(NVJpegSink::Create(sink, output_dir_.string(), {w, h, 3, {"", "", ""}}));
+
+        ASSERT_CUDA_SUCCESS(sink->Save(*data, *results));
+
+        // Data is deferred. We do NOT call Close().
+        EXPECT_FALSE(fs::exists(expected_file));
+
+        // The sink goes out of scope here, triggering the destructor.
+    }
+
+    // Verify the destructor caught the unflushed data and wrote it synchronously
+    EXPECT_TRUE(fs::exists(expected_file)) << "Destructor failed to flush remaining data!";
+    EXPECT_GT(fs::file_size(expected_file), 100);
 }
 
 } // namespace cropandweed

@@ -9,7 +9,9 @@ InferencePipeline::InferencePipeline(std::unique_ptr<ISource> src,
     : source_(std::move(src)),
       detector_(std::move(det)),
       sink_(std::move(sink)),
-      batchSize_(batchSize) {
+      batchSize_(batchSize),
+      preProcessQueue_(5),
+      postProcessQueue_(3) {
 }
 
 InferencePipeline::~InferencePipeline() {
@@ -136,7 +138,6 @@ void InferencePipeline::outputWorker() {
                 sw.Start();
                 CUDA_CALL(sink_->Save(item.first, item.second));
                 double elapsed = sw.Stop();
-
                 stats_.totalSinkMs = stats_.totalSinkMs + elapsed;
             } catch (const std::exception& e) {
                 // Log but don't necessarily kill the pipeline for one bad frame save
@@ -151,6 +152,16 @@ void InferencePipeline::outputWorker() {
             // Decrement in-flight counter: The item has left the pipeline
             --batchesInFlight_;
         }
+    }
+    // Pipeline is shutting down. Safely flush the final batch and capture its execution time.
+    try {
+        sw.Start();
+        CUDA_CALL(sink_->Close());
+        stats_.totalSinkMs = stats_.totalSinkMs + sw.Stop();
+    } catch (const std::exception& e) {
+        std::cerr << "Pipeline Sink Close Error: " << e.what() << std::endl;
+    } catch (...) {
+        std::cerr << "Pipeline Sink Close Error: UNKNOWN PROPRIETARY EXCEPTION THROWN!" << std::endl;
     }
 }
 

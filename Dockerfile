@@ -8,6 +8,8 @@ RUN apt-get update && apt-get install -y \
     libavformat-dev \
     libavutil-dev \
     cmake \
+    wget \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Copy Project Files
@@ -16,7 +18,7 @@ COPY . .
 
 # 3. Build The Project
 RUN mkdir build && cd build \
-    && cmake .. -DCMAKE_BUILD_TYPE=Release \
+    && cmake .. -DCMAKE_BUILD_TYPE=Release -DFETCH_TEST_DATA=OFF \
     && make -j$(nproc)
 
 # 4. Set Entrypoint

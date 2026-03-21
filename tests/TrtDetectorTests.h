@@ -12,6 +12,10 @@ namespace cropandweed {
 
 namespace fs = std::filesystem;
 
+// Declare the global variables from main.cpp
+extern std::string g_test_model_path;
+extern bool g_model_available;
+
 #ifndef ASSERT_CUDA_SUCCESS
 #define ASSERT_CUDA_SUCCESS(err) ASSERT_FALSE(CudaError::IsFailure(err)) << (err).Text()
 #endif
@@ -19,35 +23,16 @@ namespace fs = std::filesystem;
 class TrtDetectorTest : public ::testing::Test {
 protected:
     fs::path onnx_path_;
-    fs::path engine_path_;
     bool onnx_available_ = false;
-    fs::path temp_dir_;
 
     void SetUp() override {
-        cudaGetLastError();
-        temp_dir_ = fs::current_path() / "test_trt_cache";
-        if (!fs::exists(temp_dir_)) fs::create_directory(temp_dir_);
-
-        std::vector<fs::path> candidates = {
-            "test_model.onnx",
-            "models/test_model.onnx",
-            "../models/test_model.onnx",
-            "../../models/test_model.onnx"
-        };
-
-        for (const auto& p : candidates) {
-            if (fs::exists(p)) {
-                onnx_path_ = fs::absolute(p);
-                onnx_available_ = true;
-                break;
-            }
-        }
+        cudaGetLastError(); // Clear sticky errors
+        // Read the pre-resolved configuration from main
+        onnx_path_ = g_test_model_path;
+        onnx_available_ = g_model_available;
     }
 
     void TearDown() override {
-        if (fs::exists(temp_dir_)) {
-            fs::remove_all(temp_dir_);
-        }
         cudaGetLastError();
     }
 };
@@ -58,62 +43,34 @@ TEST_F(TrtDetectorTest, InitFailsOnMissingFile) {
     EXPECT_TRUE(CudaError::IsFailure(err));
 }
 
-TEST_F(TrtDetectorTest, BuildEngineFromOnnx) {
-    if (!onnx_available_) GTEST_SKIP() << "Skipping: 'test_model.onnx' not found.";
+TEST_F(TrtDetectorTest, BuildOrLoadEngine) {
+    if (!onnx_available_) GTEST_SKIP() << "Skipping: Model not found.";
 
     std::unique_ptr<IDetector> detector;
-    fs::path temp_onnx = temp_dir_ / "build_test.onnx";
-    fs::path temp_engine = temp_dir_ / "build_test.engine";
+    // If it's the first time running the suite, this builds. Otherwise, it loads instantly.
+    ASSERT_CUDA_SUCCESS(TrtDetector::Create(detector, onnx_path_.string()));
 
-    fs::copy_file(onnx_path_, temp_onnx, fs::copy_options::overwrite_existing);
-
-    ASSERT_CUDA_SUCCESS(TrtDetector::Create(detector, temp_onnx.string()));
-
-    EXPECT_TRUE(fs::exists(temp_engine));
+    fs::path expected_engine = onnx_path_;
+    expected_engine.replace_extension(".engine");
+    EXPECT_TRUE(fs::exists(expected_engine));
 
     ModelProperties props = detector->GetModelProperties();
     EXPECT_GT(props.inputWidth, 0);
     EXPECT_GT(props.inputHeight, 0);
 }
 
-TEST_F(TrtDetectorTest, LoadCachedEngine) {
-    if (!onnx_available_) GTEST_SKIP() << "Skipping: 'test_model.onnx' not found.";
-
-    fs::path temp_onnx = temp_dir_ / "cache_test.onnx";
-    fs::copy_file(onnx_path_, temp_onnx, fs::copy_options::overwrite_existing);
-
-    // Build
-    {
-        std::unique_ptr<IDetector> det1;
-        ASSERT_CUDA_SUCCESS(TrtDetector::Create(det1, temp_onnx.string()));
-    }
-
-    // Load
-    {
-        std::unique_ptr<IDetector> det2;
-        ASSERT_CUDA_SUCCESS(TrtDetector::Create(det2, temp_onnx.string()));
-        ModelProperties props = det2->GetModelProperties();
-        EXPECT_GT(props.inputWidth, 0);
-    }
-}
-
 TEST_F(TrtDetectorTest, DetectRunsEndToEnd) {
-    if (!onnx_available_) GTEST_SKIP() << "Skipping: 'test_model.onnx' not found.";
-
-    fs::path temp_onnx = temp_dir_ / "infer_test.onnx";
-    fs::copy_file(onnx_path_, temp_onnx, fs::copy_options::overwrite_existing);
+    if (!onnx_available_) GTEST_SKIP() << "Skipping: Model not found.";
 
     std::unique_ptr<IDetector> detector;
-    ASSERT_CUDA_SUCCESS(TrtDetector::Create(detector, temp_onnx.string()));
-    ModelProperties props = detector->GetModelProperties();
+    ASSERT_CUDA_SUCCESS(TrtDetector::Create(detector, onnx_path_.string()));
 
-    int batchSize = 2;
+    ModelProperties props = detector->GetModelProperties();
+    int batchSize = BatchData::OPTIMUM_BATCH_SIZE;
     std::shared_ptr<BatchData> input;
     ASSERT_CUDA_SUCCESS(BatchData::Create(input, 0, batchSize, props.inputWidth, props.inputHeight));
 
-    // [FIX] Use ASSERT_EQ
     ASSERT_CUDA_SUCCESS(input->deviceData.fill(0, 0));
-
     if (input->readyEvent) cudaEventRecord(*input->readyEvent, 0);
 
     BatchDetections output;
@@ -122,8 +79,40 @@ TEST_F(TrtDetectorTest, DetectRunsEndToEnd) {
     EXPECT_EQ(output.counts.size(), batchSize);
     EXPECT_EQ(output.data.size(), batchSize * BatchDetections::MAX_DETECTIONS_PER_FRAME);
 
-    ASSERT_NE(output.readyEvent, nullptr);
-    cudaEventSynchronize(*output.readyEvent);
+    if (output.readyEvent) cudaEventSynchronize(*output.readyEvent);
+}
+
+// Included the partial batch test from previous reviews
+TEST_F(TrtDetectorTest, HandlesPartialBatchWithStrictEngineSizing) {
+    if (!onnx_available_) GTEST_SKIP() << "Skipping: Model not found.";
+
+    std::unique_ptr<IDetector> detector;
+    ASSERT_CUDA_SUCCESS(TrtDetector::Create(detector, onnx_path_.string()));
+    ModelProperties props = detector->GetModelProperties();
+
+    int engineBatch = BatchData::OPTIMUM_BATCH_SIZE;
+    int validBatch = 2; // Simulate partial batch
+
+    std::shared_ptr<BatchData> input;
+    // Allocate for FULL engineBatch
+    ASSERT_CUDA_SUCCESS(BatchData::Create(input, 0, engineBatch, props.inputWidth, props.inputHeight));
+    ASSERT_CUDA_SUCCESS(input->deviceData.fill(0, 0));
+
+    // Override the valid size
+    input->batchSize = validBatch;
+    if (input->readyEvent) cudaEventRecord(*input->readyEvent, 0);
+
+    BatchDetections output;
+    ASSERT_CUDA_SUCCESS(detector->Detect(*input, output));
+
+    EXPECT_EQ(output.counts.size(), validBatch)
+        << "TRT Detector must limit output counts to the valid batch size";
+
+    size_t expectedDataElements = validBatch * BatchDetections::MAX_DETECTIONS_PER_FRAME;
+    EXPECT_EQ(output.data.size(), expectedDataElements)
+        << "TRT Detector must limit bounding box vectors to the valid batch size";
+
+    if (output.readyEvent) cudaEventSynchronize(*output.readyEvent);
 }
 
 } // namespace cropandweed

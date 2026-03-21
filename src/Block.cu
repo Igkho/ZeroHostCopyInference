@@ -204,7 +204,9 @@ CudaError Block<T, MemType>::copy_to(std::vector<T> &other, cudaStream_t stream)
 
 template <class T, MemoryType MemType>
 CudaError Block<T, MemType>::fill_back(size_t offset, T val, cudaStream_t stream) {
-    if (size_ <= offset) return CudaError();
+    if (size_ <= offset) {
+        return CudaError();
+    }
 
     size_t elements_to_fill = size_ - offset;
     size_t bytes_to_fill = elements_to_fill * sizeof(T);

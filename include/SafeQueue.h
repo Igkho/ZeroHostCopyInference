@@ -9,7 +9,9 @@ namespace cropandweed {
 template <typename T>
 class SafeQueue {
 public:
-    SafeQueue() = default;
+
+    // Added capacity parameter to enable backpressure (0 = Unbounded)
+    explicit SafeQueue(size_t capacity = 0) : capacity_(capacity) {}
     ~SafeQueue() = default;
 
     // Disable copying
@@ -20,9 +22,15 @@ public:
      * Pushes a value into the queue.
      */
     void Push(T value) {
-        std::lock_guard<std::mutex> lock(mutex_);
+//        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
+
+        // Suspend Producer thread if queue is full (Backpressure)
+        if (capacity_ > 0) {
+            cond_full_.wait(lock, [this] { return queue_.size() < capacity_; });
+        }
         queue_.push(std::move(value));
-        cond_.notify_one();
+        cond_empty_.notify_one();
     }
 
     /**
@@ -32,12 +40,17 @@ public:
     template <typename Rep, typename Period>
     bool TryPop(T& outValue, const std::chrono::duration<Rep, Period>& timeout) {
         std::unique_lock<std::mutex> lock(mutex_);
-        if (!cond_.wait_for(lock, timeout, [this] { return !queue_.empty(); })) {
+        if (!cond_empty_.wait_for(lock, timeout, [this] { return !queue_.empty(); })) {
             return false; // Timeout
         }
         
         outValue = std::move(queue_.front());
         queue_.pop();
+
+        // Wake up the Producer thread if it was blocked waiting for space
+        if (capacity_ > 0) {
+            cond_full_.notify_one();
+        }
         return true;
     }
 
@@ -60,7 +73,9 @@ public:
 private:
     std::queue<T> queue_;
     mutable std::mutex mutex_;
-    std::condition_variable cond_;
+    std::condition_variable cond_empty_; // Waits for items to process
+    std::condition_variable cond_full_;  // Waits for space to become available
+    size_t capacity_;                    // Max items allowed before blocking};
 };
 
 } // namespace cropandweed

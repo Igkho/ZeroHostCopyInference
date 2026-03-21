@@ -33,6 +33,7 @@ class ISink {
 public:
     virtual ~ISink() = default;
     virtual CudaError Save(BatchData& batch, BatchDetections& results) = 0;
+    virtual CudaError Close() = 0;
 };
 
 } // namespace cropandweed

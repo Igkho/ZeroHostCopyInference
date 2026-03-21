@@ -11,6 +11,16 @@
 
 namespace cropandweed {
 
+// Encapsulated state for Double Buffered SSD writes
+struct EncodeState {
+    HostStagingBlock<uint8_t> pinned_buffer;
+    std::vector<size_t> lengths;
+    std::vector<std::string> filenames;
+    std::unique_ptr<CudaEvent> dma_complete_event;
+    bool has_data = false;
+    int batch_size = 0;
+};
+
 class NVJpegSink : public ISink {
 private:
     struct Token {};
@@ -30,22 +40,32 @@ public:
 
     CudaError Save(BatchData& data, BatchDetections &results) override;
 
+    // Explicit pipeline termination method
+    CudaError Close() override;
+
 private:
     CudaError CheckNVJpegVersion() const;
 
     CudaError Init();
 
+    // Encapsulated helper for parallel SSD flushing
+    CudaError FlushBufferToDisk(EncodeState& buf);
+
     std::string output_path_;
     ModelProperties modelProps_;
 
-    // nvJPEG resources
-    nvjpegHandle_t nvjpeg_handle_ = nullptr;
-    std::vector<nvjpegEncoderState_t> encoder_states_;
-    nvjpegEncoderParams_t encode_params_ = nullptr;
     std::unique_ptr<CudaStream> cuda_stream_;
     std::unique_ptr<ObjectTracker> tracker_;
-    Block<uint8_t> buffer_block_;
-    HostStagingBlock<uint8_t> pinned_buffer_;
+
+    nvjpegHandle_t nvjpeg_handle_ = nullptr;
+    nvjpegEncoderParams_t encode_params_ = nullptr;
+    std::vector<nvjpegEncoderState_t> encoder_states_;
+
+    Block<uint8_t> device_decode_buffer_;
+
+    // Double Buffering Execution State
+    EncodeState staging_buffers_[2];
+    int active_buffer_ = 0;
 };
 
 } // namespace cropandweed

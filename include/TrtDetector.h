@@ -58,13 +58,15 @@ private:
     CudaError Init(const std::string& modelPath);
 
     // Helpers
+    CudaError DeserializeEngine(const void* blob, std::size_t size);
     CudaError LoadEngine(const std::string& enginePath);
     CudaError BuildEngine(const std::string& onnxPath, const std::string& savePath);
 
     // TensorRT Core objects
-    std::shared_ptr<nvinfer1::ILogger> logger_;
-    std::shared_ptr<nvinfer1::ICudaEngine> engine_;
-    std::shared_ptr<nvinfer1::IExecutionContext> context_;
+    std::unique_ptr<nvinfer1::ILogger> logger_;
+    std::unique_ptr<nvinfer1::ICudaEngine, TrtDeleter> engine_;
+    std::unique_ptr<nvinfer1::IExecutionContext, TrtDeleter> context_;
+    std::unique_ptr<nvinfer1::IRuntime, TrtDeleter> runtime_;
 
     std::unique_ptr<CudaStream> cuda_stream_;
 

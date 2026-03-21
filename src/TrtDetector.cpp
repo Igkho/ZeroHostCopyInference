@@ -18,13 +18,14 @@ class Logger : public nvinfer1::ILogger {
 };
 
 TrtDetector::TrtDetector(Token) {
-    logger_ = std::make_shared<Logger>();
+    logger_ = std::make_unique<Logger>();
 }
 
 TrtDetector::~TrtDetector() {
-    // Shared ptrs handle cleanup, but context needs explicit destruction before engine usually in older TRT
+    // Smart ptrs handle cleanup, but context needs explicit destruction before engine usually in older TRT
     context_.reset();
     engine_.reset();
+    runtime_.reset();
 }
 
 CudaError TrtDetector::Init(const std::string& modelPath) {
@@ -73,6 +74,36 @@ CudaError TrtDetector::Init(const std::string& modelPath) {
     return CudaError();
 }
 
+CudaError TrtDetector::DeserializeEngine(const void* blob, std::size_t size) {
+    runtime_ = std::unique_ptr<nvinfer1::IRuntime, TrtDeleter>(nvinfer1::createInferRuntime(*logger_));
+    if (!runtime_) {
+        return CudaError(ERROR_SOURCE, "Failed to create TRT Runtime");
+    }
+
+    engine_ = std::unique_ptr<nvinfer1::ICudaEngine, TrtDeleter>(
+        runtime_->deserializeCudaEngine(blob, size)
+        );
+    if (!engine_) {
+        return CudaError(ERROR_SOURCE, "Failed to deserialize CUDA Engine");
+    }
+
+    context_ = std::unique_ptr<nvinfer1::IExecutionContext, TrtDeleter>(
+        engine_->createExecutionContext()
+        );
+    if (!context_) {
+        return CudaError(ERROR_SOURCE, "Failed to create Execution Context");
+    }
+
+    // Setup Metadata
+    inputName_ = "images";
+    outputName_ = "output0";
+    inputDims_ = engine_->getTensorShape(inputName_.c_str());
+    outputDims_ = engine_->getTensorShape(outputName_.c_str());
+
+    std::cout << "[TRT] Engine ready for inference." << std::endl;
+    return CudaError();
+}
+
 CudaError TrtDetector::LoadEngine(const std::string& enginePath) {
 
     std::ifstream file(enginePath, std::ios::binary | std::ios::ate);
@@ -87,36 +118,7 @@ CudaError TrtDetector::LoadEngine(const std::string& enginePath) {
     if (!file.read(buffer.data(), size)) {
         return CudaError(ERROR_SOURCE, "Failed to read engine file");
     }
-
-    auto runtime = std::unique_ptr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(*logger_));
-    if (!runtime) {
-        return CudaError(ERROR_SOURCE, "Failed to create TRT Runtime");
-    }
-
-    engine_ = std::shared_ptr<nvinfer1::ICudaEngine>(
-        runtime->deserializeCudaEngine(buffer.data(), size),
-        TrtDeleter()
-        );
-    if (!engine_) {
-        return CudaError(ERROR_SOURCE, "Failed to deserialize CUDA Engine");
-    }
-
-    context_ = std::shared_ptr<nvinfer1::IExecutionContext>(
-        engine_->createExecutionContext(),
-        TrtDeleter()
-        );
-    if (!context_) {
-        return CudaError(ERROR_SOURCE, "Failed to create Execution Context");
-    }
-
-    // Setup Metadata
-    inputName_ = "images";
-    outputName_ = "output0";
-    inputDims_ = engine_->getTensorShape(inputName_.c_str());
-    outputDims_ = engine_->getTensorShape(outputName_.c_str());
-
-    std::cout << "[TRT] Engine loaded successfully." << std::endl;
-    return CudaError();
+    return DeserializeEngine(buffer.data(), size);
 }
 
 CudaError TrtDetector::BuildEngine(const std::string& onnxPath, const std::string& savePath) {
@@ -129,7 +131,7 @@ CudaError TrtDetector::BuildEngine(const std::string& onnxPath, const std::strin
         return CudaError(ERROR_SOURCE, "Failed to parse ONNX file: " + onnxPath);
     }
 
-    // [UPDATE] Robust FP16 Enablement
+    // Robust FP16 Enablement
     // We assume CC 7.0+ (Hardware FP16 support exists).
     // We surround the flag with pragmas to suppress TRT 10+ deprecation warnings.
 #pragma GCC diagnostic push
@@ -208,7 +210,7 @@ CudaError TrtDetector::BuildEngine(const std::string& onnxPath, const std::strin
         }
     }
 
-    // SAVE ENGINE TO DISK
+    // Save engine to disk
     std::ofstream engineFile(savePath, std::ios::binary);
     if (engineFile) {
         engineFile.write(reinterpret_cast<const char*>(plan->data()), plan->size());
@@ -218,28 +220,7 @@ CudaError TrtDetector::BuildEngine(const std::string& onnxPath, const std::strin
     }
 
     // Deserialize for immediate use
-    auto runtime = std::unique_ptr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(*logger_));
-    engine_ = std::shared_ptr<nvinfer1::ICudaEngine>(
-        runtime->deserializeCudaEngine(plan->data(), plan->size()),
-        TrtDeleter()
-        );
-    if (!engine_) {
-        return CudaError(ERROR_SOURCE, "Failed to deserialize built engine");
-    }
-
-    context_ = std::shared_ptr<nvinfer1::IExecutionContext>(
-        engine_->createExecutionContext(),
-        TrtDeleter()
-        );
-    if (!context_) {
-        return CudaError(ERROR_SOURCE, "Failed to create execution context");
-    }
-
-    inputName_ = "images";
-    outputName_ = "output0";
-    inputDims_ = engine_->getTensorShape(inputName_.c_str());
-    outputDims_ = engine_->getTensorShape(outputName_.c_str());
-    return CudaError();
+    return DeserializeEngine(plan->data(), plan->size());
 }
 
 CudaError TrtDetector::Detect(const BatchData& input, BatchDetections &output) {
@@ -251,23 +232,31 @@ CudaError TrtDetector::Detect(const BatchData& input, BatchDetections &output) {
         CUDA_TRY(cudaStreamWaitEvent(*cuda_stream_, *input.readyEvent, 0));
     }
 
-    int batchSize = input.batchSize;
+    int validBatchSize = input.batchSize;
+    // Derive strict engine batch size
+    int engineBatchSize = input.deviceData.size() / (input.width * input.height * 3);
+    if (engineBatchSize <= 0) {
+        engineBatchSize = validBatchSize;
+    }
+
     int channels = outputDims_.d[1]; // 84
     int anchors = outputDims_.d[2];  // 8400
 
-    // 2. Resize Buffers (Efficient Reuse)
-    CUDA_TRY(res.rawOutput.resize(batchSize * channels * anchors, *cuda_stream_));
-    size_t candSize = batchSize * BatchDetections::MAX_DETECTIONS_PER_FRAME * 10;
+    // Resize Raw Output to Engine Batch Size
+    CUDA_TRY(res.rawOutput.resize(engineBatchSize * channels * anchors, *cuda_stream_));
+
+    // Limit Candidates to Valid Batch Size
+    size_t candSize = validBatchSize * BatchDetections::MAX_DETECTIONS_PER_FRAME * 10;
     CUDA_TRY(res.candidates.resize(candSize, *cuda_stream_));
 
     CUDA_TRY(res.candidateCount.resize(1, *cuda_stream_));
     CUDA_TRY(res.candidateCount.fill(0, *cuda_stream_));
 
-    // Resize Output Structure
-    size_t resultSize = batchSize * BatchDetections::MAX_DETECTIONS_PER_FRAME; // * sizeof(DetectionRaw);
+    // Resize Output Structure (validBatchSize)
+    size_t resultSize = validBatchSize * BatchDetections::MAX_DETECTIONS_PER_FRAME;
     CUDA_TRY(output.data.resize(resultSize, *cuda_stream_));
 
-    CUDA_TRY(output.counts.resize(batchSize, *cuda_stream_));
+    CUDA_TRY(output.counts.resize(validBatchSize, *cuda_stream_));
     CUDA_TRY(output.counts.fill(0, *cuda_stream_));
 
     if (!output.readyEvent) {
@@ -279,10 +268,10 @@ CudaError TrtDetector::Detect(const BatchData& input, BatchDetections &output) {
     context_->setTensorAddress(inputName_.c_str(), const_cast<float*>(input.deviceData.data()));
     context_->setTensorAddress(outputName_.c_str(), res.rawOutput.data());
 
-    // Handle Dynamic Shapes
+    // Bind dynamic dimensions using the strict derived batch size
     if (inputDims_.d[0] == -1) {
         context_->setInputShape(inputName_.c_str(),
-                                nvinfer1::Dims4{batchSize, 3, (int)input.height, (int)input.width});
+                                nvinfer1::Dims4{engineBatchSize, 3, (int)input.height, (int)input.width});
     }
 
     // Execute (enqueueV3 is the new standard)
@@ -290,12 +279,12 @@ CudaError TrtDetector::Detect(const BatchData& input, BatchDetections &output) {
         return CudaError(ERROR_SOURCE, "TRT Inference Failed (enqueueV3 returned false)");
     }
 
-    // Post-Processing (Kernel)
+    // Pass validBatchSize to the kernels to ignore padded data
     CUDA_TRY(DecodeAndFilter(
         res.rawOutput,
         res.candidates,
         res.candidateCount,
-        batchSize,
+        validBatchSize,
         anchors,
         channels - 4,
         0.2f, // Confidence Threshold
@@ -310,7 +299,7 @@ CudaError TrtDetector::Detect(const BatchData& input, BatchDetections &output) {
         res.nmsMask,
         0.45f, // IOU threshold
         BatchDetections::MAX_DETECTIONS_PER_FRAME, // Stride
-        batchSize,
+        validBatchSize,
         *cuda_stream_));
 
     // Finalize

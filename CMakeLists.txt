@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.19 FATAL_ERROR)
 project(ZeroCopyInference LANGUAGES CXX CUDA)
 
+# Resolve FetchContent timestamp warnings by enforcing the NEW policy behavior
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -53,85 +58,51 @@ FetchContent_MakeAvailable(CLI11)
 
 FetchContent_Declare(
   yaml-cpp
-  URL https://github.com/jbeder/yaml-cpp/archive/refs/tags/yaml-cpp-0.7.0.zip
+  URL https://github.com/jbeder/yaml-cpp/archive/refs/tags/yaml-cpp-0.9.0.zip
 )
 # Suppress yaml-cpp tests/tools to speed up build
 set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(yaml-cpp)
 
-# --- ONNX Runtime (Definition) ---
+# --- ONNX Runtime (FetchContent for ALL Platforms) ---
+message(STATUS ">> Downloading pre-built ONNX Runtime...")
+
 if(PLATFORM_JETSON)
-    message(STATUS ">> Architecture: aarch64. Searching for system-installed ONNX Runtime...")
-    # Search for Headers
-    find_path(ORT_INCLUDE_DIR NAMES onnxruntime_cxx_api.h
-        PATHS
-        /usr/include/onnxruntime
-        /usr/local/include/onnxruntime
-        /opt/onnxruntime/include
-        DOC "Path to ONNX Runtime headers"
-    )
-    # Search for Library (.so)
-    find_library(ORT_LIB NAMES onnxruntime
-        PATHS
-        /usr/lib/aarch64-linux-gnu
-        /usr/local/lib
-        /opt/onnxruntime/lib
-        DOC "Path to ONNX Runtime library"
-    )
-
-    if(ORT_INCLUDE_DIR AND ORT_LIB)
-        message(STATUS "Found ONNX Runtime: ${ORT_LIB}")
-        # Create the same IMPORTED target so the rest of the script works unchanged
-        add_library(onnxruntime SHARED IMPORTED)
-        set_target_properties(onnxruntime PROPERTIES
-            IMPORTED_LOCATION "${ORT_LIB}"
-            INTERFACE_INCLUDE_DIRECTORIES "${ORT_INCLUDE_DIR}"
-        )
-    else()
-        message(FATAL_ERROR "Could not find ONNX Runtime on this Jetson. Please install it or set CMAKE_PREFIX_PATH.")
-    endif()
-
-# PC (Windows/Linux x64): Download Pre-built Binaries
+    set(ORT_URL "https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-linux-aarch64-1.19.2.tgz")
+    set(ORT_LIB_FILE "libonnxruntime.so.1.19.2")
+elseif(WIN32)
+    set(ORT_URL "https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-gpu-1.19.2.zip")
+    set(ORT_LIB_FILE "onnxruntime.lib")
+    set(ORT_DLL_FILE "onnxruntime.dll")
 else()
-    message(STATUS ">> Architecture: x86_64. Downloading pre-built ONNX Runtime...")
+    set(ORT_URL "https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-linux-x64-gpu-1.19.2.tgz")
+    set(ORT_LIB_FILE "libonnxruntime.so.1.19.2")
+endif()
 
-    if(WIN32)
-        set(ORT_URL "https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-gpu-1.19.2.zip")
-        set(ORT_LIB_FILE "onnxruntime.lib")
-        set(ORT_DLL_FILE "onnxruntime.dll")
-    else()
-        set(ORT_URL "https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-linux-x64-gpu-1.19.2.tgz")
-        set(ORT_LIB_FILE "libonnxruntime.so.1.19.2")
-        set(ORT_DLL_FILE "libonnxruntime.so.1.19.2")
-    endif()
+FetchContent_Declare(
+    onnxruntime_bin
+    URL ${ORT_URL}
+)
+FetchContent_MakeAvailable(onnxruntime_bin)
 
-    FetchContent_Declare(
-      onnxruntime_bin
-      URL ${ORT_URL}
+add_library(onnxruntime SHARED IMPORTED)
+
+# Define Properties
+if(WIN32)
+    set_target_properties(onnxruntime PROPERTIES
+        IMPORTED_IMPLIB "${onnxruntime_bin_SOURCE_DIR}/lib/${ORT_LIB_FILE}"
+        IMPORTED_LOCATION "${onnxruntime_bin_SOURCE_DIR}/lib/${ORT_DLL_FILE}"
+        INTERFACE_INCLUDE_DIRECTORIES "${onnxruntime_bin_SOURCE_DIR}/include"
     )
-    FetchContent_MakeAvailable(onnxruntime_bin)
-
-    add_library(onnxruntime SHARED IMPORTED)
-
-    # Define Properties
-    if(WIN32)
-        set_target_properties(onnxruntime PROPERTIES
-            IMPORTED_IMPLIB "${onnxruntime_bin_SOURCE_DIR}/lib/${ORT_LIB_FILE}"
-            IMPORTED_LOCATION "${onnxruntime_bin_SOURCE_DIR}/lib/${ORT_DLL_FILE}"
-            INTERFACE_INCLUDE_DIRECTORIES "${onnxruntime_bin_SOURCE_DIR}/include"
-        )
-    else()
-        set_target_properties(onnxruntime PROPERTIES
-            IMPORTED_LOCATION "${onnxruntime_bin_SOURCE_DIR}/lib/${ORT_LIB_FILE}"
-            INTERFACE_INCLUDE_DIRECTORIES "${onnxruntime_bin_SOURCE_DIR}/include"
-        )
-    endif()
-
+else()
+    set_target_properties(onnxruntime PROPERTIES
+        IMPORTED_LOCATION "${onnxruntime_bin_SOURCE_DIR}/lib/${ORT_LIB_FILE}"
+        INTERFACE_INCLUDE_DIRECTORIES "${onnxruntime_bin_SOURCE_DIR}/include"
+    )
 endif()
 
 # CUDA & TensorRT
-#find_package(OpenCV REQUIRED)
 find_package(CUDAToolkit REQUIRED)
 find_library(NVINFER_LIB nvinfer)
 find_library(NVPARSERS_LIB nvonnxparser)
@@ -140,17 +111,24 @@ if(NOT NVINFER_LIB)
     message(FATAL_ERROR "TensorRT (nvinfer) not found.")
 endif()
 
-if(WIN32)
-    # On Windows, vcpkg handles the magic automatically via the toolchain file.
-    find_package(FFmpeg REQUIRED)
-    set(PLATFORM_LIBS FFmpeg::FFmpeg)
+# Only fetch and link FFmpeg if building on PC
+if(PLATFORM_PC)
+    if(WIN32)
+        # On Windows, vcpkg handles the magic automatically via the toolchain file.
+        find_package(FFmpeg REQUIRED)
+        set(PLATFORM_LIBS FFmpeg::FFmpeg)
+    else()
+        # On Linux, use PkgConfig
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
+            libavcodec libavformat libavutil
+        )
+        set(PLATFORM_LIBS PkgConfig::FFMPEG)
+    endif()
 else()
-    # On Linux, use PkgConfig
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
-        libavcodec libavformat libavutil
-    )
-    set(PLATFORM_LIBS PkgConfig::FFMPEG)
+    # On Jetson UMA, bypass FFmpeg completely
+    message(STATUS ">> Architecture: aarch64. Skipping FFmpeg dependencies.")
+    set(PLATFORM_LIBS "")
 endif()
 
 # --- Sources ---
@@ -158,6 +136,12 @@ file(GLOB_RECURSE SOURCES src/*.cpp src/*.cu include/*.h)
 
 file(GLOB_RECURSE TESTS src/*.cpp src/*.cu include/*.h tests/*.cpp test/*.cu tests/*.h)
 list(REMOVE_ITEM TESTS ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp)
+
+# Strip FFmpeg source implementation from Jetson build
+if(PLATFORM_JETSON)
+    list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/FFmpegSource.cpp")
+    list(REMOVE_ITEM TESTS "${CMAKE_CURRENT_SOURCE_DIR}/src/FFmpegSource.cpp")
+endif()
 
 # --- Target ---
 add_executable(ZeroCopyInference ${SOURCES})
@@ -176,7 +160,7 @@ macro(configure_target target_name includedir)
 
   target_compile_options(${target_name} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
 
-  target_compile_definitions(${target_name} PRIVATE ENABLE_DEBUG_SYNC)
+#  target_compile_definitions(${target_name} PRIVATE ENABLE_DEBUG_SYNC)
 
   # -Xnvlink passes the -w flag to the device linker, silencing incompatible library warnings
   target_link_options(${target_name} PRIVATE $<DEVICE_LINK:-Xnvlink -w>)
@@ -209,7 +193,7 @@ macro(configure_target target_name includedir)
     endif()
   endif()
 
-  # Consolidated Linking
+    # Consolidated Linking
   target_link_libraries(${target_name} PRIVATE
       onnxruntime
       ${PLATFORM_LIBS}
@@ -229,6 +213,21 @@ configure_target(ZeroCopyInference ${INCLUDE_DIR})
 configure_target(ZeroCopyInferenceTests "${TESTS_INCLUDE_DIR}")
 
 target_link_libraries(ZeroCopyInferenceTests PRIVATE GTest::gtest_main GTest::gmock_main)
+
+option(FETCH_TEST_DATA "Download test frames during build" ON)
+
+if(FETCH_TEST_DATA)
+    message(STATUS ">> Configuring frames data bootstrapping target...")
+
+    # Fetch Frames Data Target
+    add_custom_target(fetch_frames ALL
+        COMMAND bash ${CMAKE_SOURCE_DIR}/download_frames_data.sh
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Verifying frames data environment..."
+    )
+    # Force executables to wait for the download to finish!
+    add_dependencies(ZeroCopyInference fetch_frames)
+endif()
 
 # Standard definitions
 target_compile_definitions(ZeroCopyInference PRIVATE -DUNICODE)

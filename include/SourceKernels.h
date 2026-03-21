@@ -16,4 +16,12 @@ CudaError NV12ToRGBPlanar(const uint8_t* srcY,
                           cudaStream_t stream = 0
                           );
 
-}
+
+CudaError ResizeAndCastRGBPlanar(const uint8_t* srcR,
+                                 const uint8_t* srcG,
+                                 const uint8_t* srcB,
+                                 int srcW, int srcH, int srcPitch,
+                                 float* dstBase, int dstW, int dstH,
+                                 cudaStream_t stream = 0);
+
+} // namespace cropandweed

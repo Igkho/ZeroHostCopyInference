@@ -132,12 +132,15 @@ public:
 
     CudaError Save(BatchData& batch, BatchDetections& results) override {
         ctx_->sinkCalls++;
-
         // Verify Sync logic
         if (results.readyEvent) {
             cudaEventSynchronize(*results.readyEvent);
         }
 
+        return CudaError();
+    }
+
+    CudaError Close() override {
         return CudaError();
     }
 

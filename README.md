@@ -37,7 +37,7 @@ The previous phases **Phase 3 (Integration)** and **Phase 4 (Functional Inferenc
 | **Object Tracker** | ✅ **Stable** | Kernels for position prediction, IOU matching, velocity filtering. |
 | **Post-Processing** | ✅ **Stable** | Custom CUDA kernels for YOLOv8 output decoding & NMS. |
 | **Windows Port** | 🚧 **WIP** | Adapting CMake & CUDA |
-| **Jetson Port** | 🚧 **WIP** | New memory zero-copy abstractions implemented for Jetson UMA. |
+| **Jetson Port** | 🚧 **WIP** | Native CUDA/TRT pipeline operational. Migration to hardware MMAPI pending to resolve NVJpeg/TRT silicon contention. |
 
 ---
 
@@ -63,9 +63,9 @@ The model is hosted in the research repository (AGPL-3.0):
 ### Supported Platforms
 * ✅ Linux x64 (Verified on Ubuntu 24.04 / RTX 3060 Ti)
 * 🚧 Windows 10/11 (Build scripts implemented, pending validation)
-* 🚧 Nvidia Jetson Orin (CMake configuration and memory abstractions ready, pending hardware tests)
+* 🚧 Nvidia Jetson Orin (Verified on Ubuntu 22.04 / JetPack 6.0)
 
-Note: The CMakeLists.txt contains specific logic for vcpkg (Windows) and aarch64 (Jetson), but these targets are currently experimental.
+Note: Jetson currently requires passing a directory of images (`-i ./frames/`) instead of an `.mp4` file while MMAPI hardware decoding is being implemented.
 
 ## Dependencies
 
@@ -83,7 +83,34 @@ Note: The CMakeLists.txt contains specific logic for vcpkg (Windows) and aarch64
     
 ## Compilation & Run
 
-### Build & Run (Native)
+### Build & Run (PC Native - Linux x64)
+
+```bash
+git clone https://github.com/Igkho/ZeroHostCopyInference.git
+cd ZeroHostCopyInference
+
+mkdir build
+mv ~/Downloads/best_int8.onnx ./build/
+
+cd build
+cmake ..
+make -j$(nproc)
+```
+
+### Run pipeline 
+
+```bash
+./ZeroCopyInference -i ../video/Moving.mp4 --backend trt --model best_int8.onnx -b 16 -o Moving
+```
+
+### Run tests
+
+```bash
+./ZeroCopyInferenceTests --model best_int8.onnx
+```
+
+### Build & Run (Jetson Native - Recommended)
+Building natively on the Jetson Orin ensures the compiler has direct access to the specialized L4T hardware headers (nvjpeg.h) and TensorRT libraries.
 
 ```bash
 git clone https://github.com/Igkho/ZeroHostCopyInference.git
@@ -98,18 +125,20 @@ make -j$(nproc)
 ```
 
 ### Run pipeline
+Note: Jetson requires a directory of frames (fetched automatically by cmake) as input instead of an .mp4
 
 ```bash
-./ZeroCopyInference -i ../video/Moving.mp4 --backend trt --model best_int8.onnx -b 16 -o Moving
+./ZeroCopyInference -i ../frames/ --backend trt --model best_int8.onnx -b 16 -o Moving
 ```
 
 ### Run tests
 
 ```bash
-./ZeroCopyInferenceTests
+./ZeroCopyInferenceTests --model best_int8.onnx
 ```
 
-### Quick Start (Docker)
+
+### Quick Start (Docker - Linux x64)
 No C++ compilation required. Requires NVIDIA Container Toolkit.
 
 ### Run pipeline
@@ -121,25 +150,34 @@ cd ZeroHostCopyInference
 
 mkdir models
 mv ~/Downloads/best_int8.onnx ./models/
+bash download_frames_data.sh
 
 docker run --rm --gpus all \
   -v $(pwd)/video:/app/video \
   -v $(pwd)/models:/app/models \
   ghcr.io/igkho/zerohostcopyinference:main \
-  -i video/Moving.mp4 \
+  -i /app/video/Moving.mp4 \
   --backend trt \
   --model /app/models/best_int8.onnx \
   -b 16 \
-  -o video/output
+  -o /app/video/output
 ```
 
 ### Run tests
 
 ```bash
+git clone https://github.com/Igkho/ZeroHostCopyInference.git
+cd ZeroHostCopyInference
+
+mkdir models
+mv ~/Downloads/best_int8.onnx ./models/
 
 docker run --rm --gpus all \
-  --entrypoint ./build/ZeroCopyInferenceTests \
-  ghcr.io/igkho/zerohostcopyinference:main
+  -v $(pwd)/video:/app/video \
+  -v $(pwd)/models:/app/models \
+  --entrypoint /app/build/ZeroCopyInferenceTests \
+    ghcr.io/igkho/zerohostcopyinference:main \
+  --model /app/models/best_int8.onnx
 ```
 
 ## 🚀 Performance Benchmarks
@@ -179,8 +217,25 @@ Both **TensorRT** (Highly Optimized) and **ONNX Runtime** (Generic Compatibility
 | :--- | :--- | :--- | :--- | :--- |
 | **TensorRT (INT8)** | **~164.8** | **~3.36 ms** | **1.4x** | Maximum performance. **Recommended.** |
 | **TensorRT (FP16)** | **~118.1** | **~5.58 ms** | **1.0x (Ref)** | Baseline hardware acceleration. |
-| **ONNX Runtime** | **~38.4** | **~26.0 ms** | **0.33x** | Generic execution. Useful for testing new models. |
+| **ONNX Runtime** | **~38.4** | **~24.2 ms** | **0.33x** | Generic execution. Useful for testing new models. |
 
+### 4. Edge Performance (Jetson Orin Nano 8GB)
+*Initial port performance. Optimization phase in progress.*
+
+**Scenario:** 1440x1440 Input Resolution (Directory of JPEG frames).
+
+**Model:** YOLOv8 Medium (YOLOv8m) 1024x1024 @ FP16.
+
+| Metric | Result, FPS | Notes |
+| :--- | :--- | :--- |
+| **Infrastructure Ceiling (Stub)** | **~77.5** | Maximum pipeline speed utilizing `NVJpeg` software decode/encode. |
+| **TensorRT (FP16)** | **~22.2** | Baseline hardware acceleration. |
+| **TensorRT (INT8)** | **~31.4** | Optimized engine. Inference latency dropped to ~27.4ms. |
+
+**Current Bottleneck Analysis (Why 31 FPS?):**
+Currently, the `NVJpegSource` and `NVJpegSink` rely on the Jetson's CUDA cores. When the TensorRT engine engages, it fiercely competes with the decoders for the same unified silicon, slowing down decode/encode times. 
+
+**Next Steps (Phase 5):** Pending the migration of the Source and Sink to the Jetson Multimedia API (MMAPI). This will offload image processing to dedicated hardware ASICs (NVDEC/NVENC/NVJPEG), isolating TensorRT on the CUDA cores and drastically raising the total FPS.
 
 ## ⚖️ License
 

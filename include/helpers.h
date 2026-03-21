@@ -17,7 +17,6 @@ static inline std::string ErrorSource(const char *file, int line) {
     return fileName + ":" + std::to_string(line);
 }
 
-// Macro maps to the namespace function below
 #define ERROR_SOURCE cropandweed::ErrorSource(__FILE__, __LINE__)
 
 class CudaError {
@@ -66,14 +65,6 @@ public:
 
     template <class T>
     CudaError(const std::string &source, T cudaErrCode) {
-// #ifdef ENABLE_DEBUG_SYNC
-//         if constexpr (std::is_same_v<T, cudaError_t>) {
-//             // If the initial async launch didn't fail, force a sync to catch execution faults
-//             if (!IsFailure(cudaErrCode)) {
-//                 cudaErrCode = cudaDeviceSynchronize();
-//             }
-//         }
-// #endif
         if (IsFailure(cudaErrCode)) {
             call_stack_.emplace_back(source, GetErrorString(cudaErrCode));
         }
@@ -109,14 +100,6 @@ private:
 } \
 }
 
-// #define CUDA_CALL_NO_THROW(f) { \
-// auto _res = (f); \
-//     if (cropandweed::CudaError::IsFailure(_res)) { \
-//         cropandweed::CudaError _err(ERROR_SOURCE, _res); \
-//         std::cerr << _err.Text() << std::endl; \
-// } \
-// }
-
 template <typename T>
 void LogDestructorErrorSafe(T err_code, const char* file, int line) noexcept {
     if (static_cast<int>(err_code) != 0) {
@@ -128,11 +111,19 @@ void LogDestructorErrorSafe(T err_code, const char* file, int line) noexcept {
 
 #define CUDA_CALL_NO_THROW(f) cropandweed::LogDestructorErrorSafe((f), __FILE__, __LINE__)
 
-
 #define CUDA_TRY(f) { \
     auto _res = (f); \
     if (cropandweed::CudaError::IsFailure(_res)) { \
         return cropandweed::CudaError(ERROR_SOURCE, _res); \
+} \
+}
+
+// Macro for clean error propagation inside the async lambda
+#define CUDA_TRY_LAMBDA(call, res_obj) { \
+auto _status = (call); \
+    if (CudaError::IsFailure(_status)) { \
+        (res_obj).err = CudaError(ERROR_SOURCE, _status); \
+        return (res_obj); \
 } \
 }
 

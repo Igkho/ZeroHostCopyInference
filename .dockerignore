@@ -8,3 +8,6 @@ temp/
 *.onnx
 *.py
 project_context.txt
+frames/
+models/
+*.zip

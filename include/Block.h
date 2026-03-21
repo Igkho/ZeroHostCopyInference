@@ -129,6 +129,9 @@ public:
     //! Fills all initialized elements (from 0 to size()) with the given value.
     CudaError fill(T val, cudaStream_t stream = 0);
 
+    //! Fills elements from `offset` up to `size_`
+    CudaError fill_back(size_t offset, T val, cudaStream_t stream);
+
     //! Erases all elements from the container. After this call, size() returns zero.
     //! Leaves the capacity() of the block unchanged
     __host__ __device__ void clear() noexcept;
@@ -205,9 +208,6 @@ private:
     //! If possible (the size of a host vector is enough) copies the data from this block to other host vector.
     //! No memory allocations are made. Assumes output vector is already resized.
     CudaError copy_to(std::vector<T> &other, cudaStream_t stream) const;
-
-    //! Fills elements from `offset` up to `size_`. Does no bounds checking.
-    CudaError fill_back(size_t offset, T val, cudaStream_t stream);
 };
 
 // Header-only adapter for type safety without template instantiation
