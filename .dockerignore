@@ -6,6 +6,7 @@ temp/
 .aider*
 *.user
 *.onnx
+*.engine
 *.py
 project_context.txt
 frames/
