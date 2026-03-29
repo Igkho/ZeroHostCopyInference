@@ -14,6 +14,8 @@ if(NOT DEFINED CMAKE_CUDA_STANDARD)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 endif()
 
+set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
+
 # --- Platform Detection ---
 set(PLATFORM_JETSON OFF)
 set(PLATFORM_PC OFF)
@@ -111,24 +113,36 @@ if(NOT NVINFER_LIB)
     message(FATAL_ERROR "TensorRT (nvinfer) not found.")
 endif()
 
-# Only fetch and link FFmpeg if building on PC
+# Hardware MMAPI is the default. Software CUDA is an explicit fallback.
+option(USE_JETSON_CUDA_JPEG "Fallback to CUDA SMs (NVJPEG) instead of Hardware Silicon on Jetson" OFF)
+
+# Only fetch and link FFmpeg if building on PC and route the correct JPEG backend per platform
 if(PLATFORM_PC)
     if(WIN32)
         # On Windows, vcpkg handles the magic automatically via the toolchain file.
         find_package(FFmpeg REQUIRED)
-        set(PLATFORM_LIBS FFmpeg::FFmpeg)
+        set(PLATFORM_LIBS FFmpeg::FFmpeg CUDA::nvjpeg)
     else()
         # On Linux, use PkgConfig
         find_package(PkgConfig REQUIRED)
-        pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
-            libavcodec libavformat libavutil
-        )
-        set(PLATFORM_LIBS PkgConfig::FFMPEG)
+        pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavformat libavutil)
+        set(PLATFORM_LIBS PkgConfig::FFMPEG CUDA::nvjpeg)
     endif()
 else()
     # On Jetson UMA, bypass FFmpeg completely
-    message(STATUS ">> Architecture: aarch64. Skipping FFmpeg dependencies.")
-    set(PLATFORM_LIBS "")
+    message(STATUS ">> Skipping FFmpeg dependencies.")
+    if (USE_JETSON_CUDA_JPEG)
+        set(PLATFORM_LIBS CUDA::nvjpeg)
+    else()
+        # Explicitly search for nvjpeg ONLY in the tegra directory
+        find_library(TEGRA_NVJPEG_LIB nvjpeg
+            PATHS /usr/lib/aarch64-linux-gnu/tegra
+            NO_DEFAULT_PATH)
+        if (NOT TEGRA_NVJPEG_LIB)
+            message(FATAL_ERROR "Could not find hardware libnvjpeg.so in Tegra directory!")
+        endif()
+        set(PLATFORM_LIBS ${TEGRA_NVJPEG_LIB} nvbufsurface libnvbufsurftransform.so EGL GLESv2 v4l2)
+    endif()
 endif()
 
 # --- Sources ---
@@ -139,9 +153,53 @@ list(REMOVE_ITEM TESTS ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp)
 
 # Strip FFmpeg source implementation from Jetson build
 if(PLATFORM_JETSON)
+    # FFmpeg is always removed on Jetson
     list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/FFmpegSource.cpp")
     list(REMOVE_ITEM TESTS "${CMAKE_CURRENT_SOURCE_DIR}/src/FFmpegSource.cpp")
+
+    if (USE_JETSON_CUDA_JPEG)
+        message(STATUS ">> Jetson Backend: CUDA SM NVJPEG (Software Fallback)")
+
+        # 1. Pass a #define to C++ so main.cpp knows to load NVJpeg classes
+        add_compile_definitions(USE_JETSON_CUDA_JPEG)
+
+        # 2. Strip the MMAPI classes from the build
+        list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/MMAPIJpegSource.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/MMAPIJpegSink.cpp")
+        list(REMOVE_ITEM TESTS "${CMAKE_CURRENT_SOURCE_DIR}/src/MMAPIJpegSource.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/MMAPIJpegSink.cpp")
+        list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/MMAPIJpegSink.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/MMAPIJpegSink.cpp")
+        list(REMOVE_ITEM TESTS "${CMAKE_CURRENT_SOURCE_DIR}/src/MMAPIJpegSink.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/MMAPIJpegSink.cpp")
+    else()
+        message(STATUS ">> Jetson Backend: MMAPI Hardware NVJPG (Default)")
+
+        # 1. Strip the CUDA classes from the build
+        list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/NVJpegSource.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/NVJpegSink.cpp")
+        list(REMOVE_ITEM TESTS "${CMAKE_CURRENT_SOURCE_DIR}/src/NVJpegSource.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/NVJpegSink.cpp")
+        list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/NVJpegSink.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/NVJpegSink.cpp")
+        list(REMOVE_ITEM TESTS "${CMAKE_CURRENT_SOURCE_DIR}/src/NVJpegSink.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/NVJpegSink.cpp")
+
+        # 2. Add MMAPI dependencies
+        set(MMAPI_CLASS_DIR /usr/src/jetson_multimedia_api/samples/common/classes)
+        set(MMAPI_SOURCES
+            ${MMAPI_CLASS_DIR}/NvJpegDecoder.cpp
+            ${MMAPI_CLASS_DIR}/NvJpegEncoder.cpp
+            ${MMAPI_CLASS_DIR}/NvElement.cpp
+            ${MMAPI_CLASS_DIR}/NvElementProfiler.cpp
+            ${MMAPI_CLASS_DIR}/NvLogging.cpp
+            ${MMAPI_CLASS_DIR}/NvBuffer.cpp
+        )
+        list(APPEND SOURCES ${MMAPI_SOURCES})
+        list(APPEND TESTS ${MMAPI_SOURCES})
+    endif()
 endif()
+
+# Strip MMAPI source implementation from PC build
+if(PLATFORM_PC)
+    list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/MMAPIJpegSource.cpp")
+    list(REMOVE_ITEM TESTS "${CMAKE_CURRENT_SOURCE_DIR}/src/MMAPIJpegSource.cpp")
+    list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/MMAPIJpegSink.cpp")
+    list(REMOVE_ITEM TESTS "${CMAKE_CURRENT_SOURCE_DIR}/src/MMAPIJpegSink.cpp")
+endif()
+
 
 # --- Target ---
 add_executable(ZeroCopyInference ${SOURCES})
@@ -152,60 +210,78 @@ set(TESTS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 
 macro(configure_target target_name includedir)
-  set_target_properties(${target_name} PROPERTIES POSITION_INDEPENDENT_CODE ON)
-  set_target_properties(${target_name} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+    set_target_properties(${target_name} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    set_target_properties(${target_name} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
-  target_compile_options(${target_name} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler -fopenmp>)
-  target_compile_options(${target_name} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--default-stream per-thread>)
+    # # Explicitly bind the RPATH to the target if we are on Jetson Hardware Silicon Mode
+    # if(PLATFORM_JETSON AND NOT USE_JETSON_CUDA_JPEG)
+    #     set_target_properties(${target_name} PROPERTIES BUILD_RPATH "/usr/lib/aarch64-linux-gnu/tegra")
+    #     set_target_properties(${target_name} PROPERTIES INSTALL_RPATH "/usr/lib/aarch64-linux-gnu/tegra")
+    # endif()
 
-  target_compile_options(${target_name} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
+    target_compile_options(${target_name} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler -fopenmp>)
+    target_compile_options(${target_name} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--default-stream per-thread>)
 
-#  target_compile_definitions(${target_name} PRIVATE ENABLE_DEBUG_SYNC)
+    target_compile_options(${target_name} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
 
-  # -Xnvlink passes the -w flag to the device linker, silencing incompatible library warnings
-  target_link_options(${target_name} PRIVATE $<DEVICE_LINK:-Xnvlink -w>)
+#    target_compile_definitions(${target_name} PRIVATE ENABLE_DEBUG_SYNC)
 
-  target_include_directories(${target_name} PRIVATE
-      "${includedir}"
-      ${CMAKE_CURRENT_SOURCE_DIR}/include
-      ${onnxruntime_INCLUDE_DIRS}
-      ${CUDAToolkit_INCLUDE_DIRS}
-  )
+    # -Xnvlink passes the -w flag to the device linker, silencing incompatible library warnings
+    target_link_options(${target_name} PRIVATE $<DEVICE_LINK:-Xnvlink -w>)
 
-  if (PLATFORM_PC)
-    # Set properties based on OS
-    if(WIN32)
-        # Windows DLL Copy Rule
-        add_custom_command(TARGET ${target_name} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${onnxruntime_bin_SOURCE_DIR}/lib/${ORT_DLL_FILE}"
-            $<TARGET_FILE_DIR:${target_name}>
+    # Force legacy RPATH so LD_LIBRARY_PATH cannot hijack libnvjpeg.so
+    target_link_options(${target_name} PRIVATE "-Wl,--disable-new-dtags")
+
+    target_include_directories(${target_name} PRIVATE
+        "${includedir}"
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${onnxruntime_INCLUDE_DIRS}
+        ${CUDAToolkit_INCLUDE_DIRS}
+    )
+
+    if (PLATFORM_JETSON AND NOT USE_JETSON_CUDA_JPEG)
+        target_include_directories(${target_name} PRIVATE
+            /usr/src/jetson_multimedia_api/include
+            /usr/src/jetson_multimedia_api/include/libjpeg-8b
+            ${MMAPI_CLASS_DIR}
         )
-    else()
-        # Linux PC: Copy .so AND provider .so
-        add_custom_command(TARGET ${target_name} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${onnxruntime_bin_SOURCE_DIR}/lib/libonnxruntime_providers_shared.so"
-            "${onnxruntime_bin_SOURCE_DIR}/lib/libonnxruntime_providers_cuda.so"
-            "${onnxruntime_bin_SOURCE_DIR}/lib/libonnxruntime_providers_tensorrt.so" # Optional if using TRT
-            $<TARGET_FILE_DIR:${target_name}>
+        target_link_directories(${target_name} PRIVATE
+            /usr/lib/aarch64-linux-gnu/tegra
         )
     endif()
-  endif()
+
+    if (PLATFORM_PC)
+        # Set properties based on OS
+        if(WIN32)
+            # Windows DLL Copy Rule
+            add_custom_command(TARGET ${target_name} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${onnxruntime_bin_SOURCE_DIR}/lib/${ORT_DLL_FILE}"
+                $<TARGET_FILE_DIR:${target_name}>
+            )
+        else()
+            # Linux PC: Copy .so AND provider .so
+            add_custom_command(TARGET ${target_name} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${onnxruntime_bin_SOURCE_DIR}/lib/libonnxruntime_providers_shared.so"
+                "${onnxruntime_bin_SOURCE_DIR}/lib/libonnxruntime_providers_cuda.so"
+                "${onnxruntime_bin_SOURCE_DIR}/lib/libonnxruntime_providers_tensorrt.so" # Optional if using TRT
+                $<TARGET_FILE_DIR:${target_name}>
+            )
+        endif()
+    endif()
 
     # Consolidated Linking
-  target_link_libraries(${target_name} PRIVATE
-      onnxruntime
-      ${PLATFORM_LIBS}
-      CUDA::cudart
-      CUDA::cuda_driver
-      CUDA::nvjpeg
-      yaml-cpp
-      ${NVINFER_LIB}
-      ${NVPARSERS_LIB}
-      CLI11::CLI11
-  )
-
+    target_link_libraries(${target_name} PRIVATE
+        onnxruntime
+        ${PLATFORM_LIBS}
+        CUDA::cudart
+        CUDA::cuda_driver
+        yaml-cpp
+        ${NVINFER_LIB}
+        ${NVPARSERS_LIB}
+        CLI11::CLI11
+    )
 endmacro()
 
 configure_target(ZeroCopyInference ${INCLUDE_DIR})

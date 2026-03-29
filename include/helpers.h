@@ -7,6 +7,9 @@
 #include <vector>
 #include <cuda_runtime_api.h>
 #include <nvjpeg.h>
+#if defined(PLATFORM_JETSON) && !defined(USE_JETSON_CUDA_JPEG)
+#include <nvbufsurftransform.h>
+#endif
 #include <memory>
 #include <type_traits>
 
@@ -41,6 +44,27 @@ public:
         }
     }
 
+#if defined(PLATFORM_JETSON) && !defined(USE_JETSON_CUDA_JPEG)
+    // Jetson Hardware Transform Enums
+    static inline const char * GetErrorString(NvBufSurfTransform_Error err) {
+        switch(err) {
+        case NvBufSurfTransformError_Success: return "Success";
+        case NvBufSurfTransformError_Invalid_Params: return "Invalid Params (-3)";
+        case NvBufSurfTransformError_Execution_Error: return "Execution Error (-2)";
+        case NvBufSurfTransformError_Unsupported: return "Unsupported (-1)";
+        case NvBufSurfTransformError_ROI_Error: return "ROI Error (-4)";
+        default: return "Unknown NvBufSurfTransform Error";
+        }
+    }
+
+    static inline const char * GetErrorString(int err) {
+        switch(err) {
+        case 0: return "Success";
+        default: return "NvBufSurface Error";
+        }
+    }
+#endif
+
     static inline std::string GetErrorString(const std::string &err) {
         return err;
     }
@@ -52,6 +76,16 @@ public:
     static bool IsFailure(nvjpegStatus_t err) {
         return err != NVJPEG_STATUS_SUCCESS;
     }
+
+#if defined(PLATFORM_JETSON) && !defined(USE_JETSON_CUDA_JPEG)
+    static bool IsFailure(NvBufSurfTransform_Error err) {
+        return err != NvBufSurfTransformError_Success;
+    }
+
+    static bool IsFailure(int err) {
+        return err != 0;
+    }
+#endif
 
     static bool IsFailure(const std::string &err) {
         return !err.empty();

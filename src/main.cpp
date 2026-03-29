@@ -10,9 +10,18 @@
 #include "Block.h"
 #include "InferencePipeline.h"
 #include "FFmpegSource.h"
+
+#if defined(PLATFORM_JETSON) && !defined(USE_JETSON_CUDA_JPEG)
+// Jetson MMAPI Hardware Default
+#include "MMAPIJpegSource.h"
+#include "MMAPIJpegSink.h"
+#else
+// PC Platform OR Jetson CUDA Fallback
 #include "NVJpegSource.h"
-#include "Interfaces.h"
 #include "NVJpegSink.h"
+#endif
+
+#include "Interfaces.h"
 #include "PerformanceTimer.h"
 #include "BatchData.h"
 #include "StubDetector.h"
@@ -142,8 +151,14 @@ int main(int argc, char** argv) {
         // Create Source
         std::unique_ptr<ISource> source;
         if (fs::is_directory(inputPath)) {
+#if defined(PLATFORM_JETSON) && !defined(USE_JETSON_CUDA_JPEG)
+            std::cout << "[Main] Input is a directory. Initializing MMAPIJpegSource..." << std::endl;
+            CUDA_CALL(MMAPIJpegSource::Create(source, inputPath, props.inputWidth,
+                                              props.inputHeight, batchSize));
+#else
             std::cout << "[Main] Input is a directory. Initializing NVJpegSource..." << std::endl;
             CUDA_CALL(NVJpegSource::Create(source, inputPath, props.inputWidth, props.inputHeight));
+#endif
         } else if (fs::is_regular_file(inputPath)) {
             // Hardware-aware routing: Prevent Jetson from attempting unsupported NVDEC video decoding
 #ifdef PLATFORM_JETSON
@@ -161,8 +176,11 @@ int main(int argc, char** argv) {
 
         // Create Sink
         std::unique_ptr<ISink> sink;
+#if defined(PLATFORM_JETSON) && !defined(USE_JETSON_CUDA_JPEG)
+        CUDA_CALL(MMAPIJpegSink::Create(sink, outputPath, props, batchSize));
+#else
         CUDA_CALL(NVJpegSink::Create(sink, outputPath, props));
-
+#endif
         // Create and Run Pipeline
         InferencePipeline pipeline(
             std::move(source),

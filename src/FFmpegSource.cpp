@@ -6,7 +6,7 @@
 #include <vector>
 #include <algorithm>
 #include <filesystem>
-#include <cuda.h>
+// #include <cuda.h>
 
 
 extern "C" {

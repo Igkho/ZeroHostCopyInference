@@ -1,9 +1,5 @@
 #pragma once
 
-// Completely hide these tests from the compiler on Jetson
-// to prevent linker errors since FFmpegSource.cpp is excluded via CMake.
-#ifndef PLATFORM_JETSON
-
 #include <gtest/gtest.h>
 #include <memory>
 #include <string>
@@ -296,5 +292,3 @@ TEST_F(FFmpegSourceKernelTest, GlobalMemoryImplementation) {
 }
 
 } // namespace cropandweed
-
-#endif // PLATFORM_JETSON

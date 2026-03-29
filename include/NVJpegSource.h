@@ -57,7 +57,7 @@ private:
     std::unique_ptr<CudaEvent> dma_complete_event_[2];
     int active_buffer_ = 0;
 
-    Block<uint8_t> device_decode_buffer_;             // Holds the raw decoded uint8_t pixels
+    Block<uint8_t> device_decode_buffer_; // Holds the raw decoded uint8_t pixels
 };
 
 }

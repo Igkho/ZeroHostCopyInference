@@ -16,10 +16,22 @@ namespace cropandweed {
 #include "HelpersTests.h"
 #include "BlockTests.h"
 #include "SafeQueueTests.h"
+
+#ifndef PLATFORM_JETSON
 #include "FFMpegSourceTests.h"
+#endif
+
+#if defined(PLATFORM_JETSON) && !defined(USE_JETSON_CUDA_JPEG)
+// Jetson MMAPI Hardware Default
+#include "MMAPIJpegSourceTests.h"
+#include "MMAPIJpegSinkTests.h"
+#else
+// PC Platform OR Jetson CUDA Fallback
 #include "NVJpegSourceTests.h"
-#include "StubDetectorTests.h"
 #include "NVJpegSinkTests.h"
+#endif
+
+#include "StubDetectorTests.h"
 #include "PerformanceTimerTests.h"
 #include "InferencePipelineTests.h"
 #include "DetectorKernelsTests.h"

@@ -6,7 +6,7 @@
 #include <string>
 #include <cuda_runtime.h>
 
-#include "NVJpegSink.h"
+#include "MMAPIJpegSink.h"
 #include "SinkKernels.h"
 #include "BatchData.h"
 #include "BatchDetections.h"
@@ -17,18 +17,17 @@ namespace cropandweed {
 
 namespace fs = std::filesystem;
 
-// Local assertion macro
 #ifndef ASSERT_CUDA_SUCCESS
 #define ASSERT_CUDA_SUCCESS(err) ASSERT_FALSE(CudaError::IsFailure(err)) << (err).Text()
 #endif
 
-class NVJpegSinkTest : public ::testing::Test {
+class MMAPIJpegSinkTest : public ::testing::Test {
 protected:
     fs::path output_dir_;
 
     void SetUp() override {
         // Unique output directory for this test run
-        output_dir_ = fs::current_path() / "test_output_sink";
+        output_dir_ = fs::current_path() / "test_mmapi_output_sink";
         if (fs::exists(output_dir_)) {
             fs::remove_all(output_dir_);
         }
@@ -43,106 +42,61 @@ protected:
 };
 
 // ==========================================
-// 1. Kernel Tests (FloatToUint8)
+// 1. Sink Lifecycle Tests
 // ==========================================
 
-TEST_F(NVJpegSinkTest, KernelFloatToUint8Conversion) {
-    // Test values covering: Underflow, Zero, Mid-range, One, Overflow
-    std::vector<float> h_src = { -0.5f, 0.0f, 0.5f, 1.0f, 1.5f };
-    int count = (int)h_src.size();
-
-    Block<float> d_src;
-    Block<uint8_t> d_dst;
-
-    ASSERT_CUDA_SUCCESS(d_dst.resize(count));
-    ASSERT_CUDA_SUCCESS(d_src.assign(h_src));
-    // Copy to GPU
-
-    // Run Kernel
-    ASSERT_CUDA_SUCCESS(FloatToUint8(d_src.data(), d_dst.data(), count, 0));
-    
-    // Sync (Kernel runs on default stream)
-    cudaDeviceSynchronize();
-
-    // Copy back
-    std::vector<uint8_t> h_dst;
-    ASSERT_CUDA_SUCCESS(d_dst.to_vector(h_dst));
-
-    // Verify
-    // -0.5 -> 0
-    EXPECT_EQ(h_dst[0], 0);
-    // 0.0 -> 0
-    EXPECT_EQ(h_dst[1], 0);
-    // 0.5 -> 128 (approx 127 or 128 depending on rounding 0.5*255 = 127.5)
-    // The kernel uses `val * 255.0f + 0.5f` (rounding to nearest)
-    // 0.5 * 255 = 127.5 + 0.5 = 128.0 -> 128
-    EXPECT_EQ(h_dst[2], 128);
-    // 1.0 -> 255
-    EXPECT_EQ(h_dst[3], 255);
-    // 1.5 -> 255
-    EXPECT_EQ(h_dst[4], 255);
-}
-
-// ==========================================
-// 2. Sink Lifecycle Tests
-// ==========================================
-
-TEST_F(NVJpegSinkTest, CreateAndInit) {
+TEST_F(MMAPIJpegSinkTest, CreateAndInit) {
     std::unique_ptr<ISink> sink;
+    int batchSize = 4;
+
     // Factory should create the directory if it doesn't exist
-    ASSERT_CUDA_SUCCESS(NVJpegSink::Create(sink, output_dir_.string(),
-                                           {1024, 1024, 3, {"", "", ""}}));
-    
+    ASSERT_CUDA_SUCCESS(MMAPIJpegSink::Create(sink, output_dir_.string(),
+                                              {1024, 1024, 3, {"", "", ""}}, batchSize));
+
     ASSERT_NE(sink, nullptr);
     EXPECT_TRUE(fs::exists(output_dir_));
     EXPECT_TRUE(fs::is_directory(output_dir_));
 }
 
 // ==========================================
-// 3. Functional Save Tests
+// 2. Functional Save Tests
 // ==========================================
 
-TEST_F(NVJpegSinkTest, SaveBatchToJpeg) {
+TEST_F(MMAPIJpegSinkTest, SaveBatchToJpeg) {
     size_t w = 64;
     size_t h = 64;
+    int batchSize = 2;
 
     // 1. Setup Sink
     std::unique_ptr<ISink> sink;
-    ASSERT_CUDA_SUCCESS(NVJpegSink::Create(sink, output_dir_.string(),
-                                           {w, h, 3, {"", "", ""}}));
+    ASSERT_CUDA_SUCCESS(MMAPIJpegSink::Create(sink, output_dir_.string(),
+                                              {w, h, 3, {"", "", ""}}, batchSize));
 
-    // 2. Prepare Batch Data (2 images, 64x64)
-    int batchSize = 2;
-    
+    // 2. Prepare Batch Data
     std::shared_ptr<BatchData> data;
     ASSERT_CUDA_SUCCESS(BatchData::Create(data, 0, batchSize, w, h));
-    
+
     // Fill image with a gradient pattern to ensure valid JPEG encoding
-    // Planar RGB: RRR... GGG... BBB...
     std::vector<float> hostImg(batchSize * w * h * 3);
     for (int b = 0; b < batchSize; ++b) {
         for (int y = 0; y < h; ++y) {
             for (int x = 0; x < w; ++x) {
                 int idx = (b * w * h * 3) + (y * w + x);
-                // Red Channel (gradient x)
                 hostImg[idx] = (float)x / w;
-                // Green Channel (gradient y)
                 hostImg[idx + w * h] = (float)y / h;
-                // Blue Channel (static)
                 hostImg[idx + 2 * w * h] = 0.5f;
             }
         }
     }
     ASSERT_CUDA_SUCCESS(data->deviceData.assign(hostImg));
 
-    // Set IDs
+    // Set IDs (MMAPIJpegSink sets output to `frame_0000{id}.jpg` due to setw pad, but if
+    // ID exceeds 4 chars, it prints the ID as-is. So "img_A" -> "frame_img_A.jpg").
     data->sourceIdentifiers = {"img_A", "img_B"};
-    
-    // 3. Prepare Batch Detections (Empty is fine, ObjectTracker handles it)
+
+    // 3. Prepare Batch Detections
     std::shared_ptr<BatchDetections> results;
     ASSERT_CUDA_SUCCESS(BatchDetections::Create(results, batchSize));
-    
-    // Need to initialize counts to 0 to prevent tracker reading garbage
     ASSERT_CUDA_SUCCESS(results->counts.fill(0, 0));
 
     // Signal events (simulating pipeline completion)
@@ -163,98 +117,96 @@ TEST_F(NVJpegSinkTest, SaveBatchToJpeg) {
     if (fs::exists(file1)) {
         EXPECT_GT(fs::file_size(file1), 100) << "JPEG file is suspiciously small";
     }
-    if (fs::exists(file2)) {
-        EXPECT_GT(fs::file_size(file2), 100) << "JPEG file is suspiciously small";
-    }
 }
 
-TEST_F(NVJpegSinkTest, HandleLargeImages) {
+TEST_F(MMAPIJpegSinkTest, HandleLargeImages) {
     size_t w = 1920;
     size_t h = 1080;
-    // Verify memory allocation handling for larger resolutions
+    int batchSize = 1;
+
     std::unique_ptr<ISink> sink;
-    ASSERT_CUDA_SUCCESS(NVJpegSink::Create(sink, output_dir_.string(),
-                                           {w, h, 3, {"", "", ""}}));
+    ASSERT_CUDA_SUCCESS(MMAPIJpegSink::Create(sink, output_dir_.string(),
+                                              {w, h, 3, {"", "", ""}}, batchSize));
 
     std::shared_ptr<BatchData> data;
     ASSERT_CUDA_SUCCESS(BatchData::Create(data, 1, 1, w, h));
-    
-    // Initialize to grey
     ASSERT_CUDA_SUCCESS(data->deviceData.fill(0, 0));
 
     std::shared_ptr<BatchDetections> results;
     ASSERT_CUDA_SUCCESS(BatchDetections::Create(results, 1));
     ASSERT_CUDA_SUCCESS(results->counts.fill(0, 0));
 
-    // Signal events
     cudaEventRecord(*data->readyEvent, 0);
     cudaEventRecord(*results->readyEvent, 0);
 
     ASSERT_CUDA_SUCCESS(sink->Save(*data, *results));
     ASSERT_CUDA_SUCCESS(sink->Close());
 
-    // Check output
-    // If IDs are missing, default naming is used: frame_{ID}.jpg
-    // BatchId=1, Index=0 -> frame_0001.jpg (since 1 * 1 + 0 = 1)
+    // Fallback logic uses batchId * batchSize + frame_idx
+    // 1 * 1 + 0 = 1 -> formatted with setw(4) -> "0001"
     fs::path file = output_dir_ / "frame_0001.jpg";
     EXPECT_TRUE(fs::exists(file));
 }
 
 // ==========================================
-// 4. Advanced Architecture & State Machine Tests
+// 3. Advanced Architecture & State Machine Tests
 // ==========================================
 
-TEST_F(NVJpegSinkTest, VerifiesDoubleBufferedDeferral) {
+TEST_F(MMAPIJpegSinkTest, VerifiesDoubleBufferedDeferral) {
     size_t w = 64;
     size_t h = 64;
+    int batchSize = 2;
 
     std::unique_ptr<ISink> sink;
-    ASSERT_CUDA_SUCCESS(NVJpegSink::Create(sink, output_dir_.string(), {w, h, 3, {"", "", ""}}));
-
-    std::shared_ptr<BatchData> data1;
-    ASSERT_CUDA_SUCCESS(BatchData::Create(data1, 1, 1, w, h));
-    ASSERT_CUDA_SUCCESS(data1->deviceData.fill(0, 0));
-    data1->sourceIdentifiers = {"batch1_img"};
-    cudaEventRecord(*data1->readyEvent, 0);
+    ASSERT_CUDA_SUCCESS(MMAPIJpegSink::Create(sink, output_dir_.string(), {w, h, 3, {"", "", ""}}, batchSize));
 
     std::shared_ptr<BatchDetections> results;
     ASSERT_CUDA_SUCCESS(BatchDetections::Create(results, 1));
     ASSERT_CUDA_SUCCESS(results->counts.fill(0, 0));
     cudaEventRecord(*results->readyEvent, 0);
 
-    // 1. Send first batch
+    // 1. Send BATCH 1 (Uses Buffer 0)
+    std::shared_ptr<BatchData> data1;
+    ASSERT_CUDA_SUCCESS(BatchData::Create(data1, 1, 1, w, h));
+    ASSERT_CUDA_SUCCESS(data1->deviceData.fill(0, 0));
+    data1->sourceIdentifiers = {"batch1_img"};
+    cudaEventRecord(*data1->readyEvent, 0);
     ASSERT_CUDA_SUCCESS(sink->Save(*data1, *results));
 
-    // Verify it is DEFERRED
-    fs::path file1 = output_dir_ / "frame_batch1_img.jpg";
-    EXPECT_FALSE(fs::exists(file1)) << "Batch 1 was written synchronously instead of being deferred!";
-
-    // 2. Prepare second batch
+    // 2. Send BATCH 2 (Uses Buffer 1 - Runs concurrently with Buffer 0!)
     std::shared_ptr<BatchData> data2;
     ASSERT_CUDA_SUCCESS(BatchData::Create(data2, 2, 1, w, h));
     ASSERT_CUDA_SUCCESS(data2->deviceData.fill(0, 0));
     data2->sourceIdentifiers = {"batch2_img"};
     cudaEventRecord(*data2->readyEvent, 0);
-
-    // 3. Send second batch. This must trigger the flush of data1.
     ASSERT_CUDA_SUCCESS(sink->Save(*data2, *results));
 
-    // Verify Batch 1 is now written, but Batch 2 is still deferred
-    EXPECT_TRUE(fs::exists(file1)) << "Batch 2 failed to trigger the N-1 flush for Batch 1.";
+    // 3. Send BATCH 3 (Uses Buffer 0)
+    // Because it reuses Buffer 0, it MUST synchronize and flush Batch 1!
+    std::shared_ptr<BatchData> data3;
+    ASSERT_CUDA_SUCCESS(BatchData::Create(data3, 3, 1, w, h));
+    ASSERT_CUDA_SUCCESS(data3->deviceData.fill(0, 0));
+    data3->sourceIdentifiers = {"batch3_img"};
+    cudaEventRecord(*data3->readyEvent, 0);
+    ASSERT_CUDA_SUCCESS(sink->Save(*data3, *results));
 
-    fs::path file2 = output_dir_ / "frame_batch2_img.jpg";
-    EXPECT_FALSE(fs::exists(file2)) << "Batch 2 was written synchronously!";
+    // Verify Batch 1 is guaranteed to be fully written now
+    fs::path file1 = output_dir_ / "frame_batch1_img.jpg";
+    EXPECT_TRUE(fs::exists(file1)) << "Batch 3 failed to synchronize the async IO threads for Batch 1.";
 
-    // 4. Explicit Close
+    // 4. Explicit Close forces synchronization of the trailing Batch 2 and Batch 3
     ASSERT_CUDA_SUCCESS(sink->Close());
 
-    // Verify Batch 2 is finally written
-    EXPECT_TRUE(fs::exists(file2)) << "Close() failed to flush the final deferred batch.";
+    fs::path file2 = output_dir_ / "frame_batch2_img.jpg";
+    fs::path file3 = output_dir_ / "frame_batch3_img.jpg";
+    EXPECT_TRUE(fs::exists(file2)) << "Close() failed to flush Batch 2.";
+    EXPECT_TRUE(fs::exists(file3)) << "Close() failed to flush Batch 3.";
 }
 
-TEST_F(NVJpegSinkTest, DestructorFallbackSavesUnflushedData) {
+TEST_F(MMAPIJpegSinkTest, DestructorFallbackSavesUnflushedData) {
     size_t w = 64;
     size_t h = 64;
+    int batchSize = 1;
 
     std::shared_ptr<BatchData> data;
     ASSERT_CUDA_SUCCESS(BatchData::Create(data, 1, 1, w, h));
@@ -272,18 +224,16 @@ TEST_F(NVJpegSinkTest, DestructorFallbackSavesUnflushedData) {
     {
         // Scope the sink so we can force its destructor to run early
         std::unique_ptr<ISink> sink;
-        ASSERT_CUDA_SUCCESS(NVJpegSink::Create(sink, output_dir_.string(), {w, h, 3, {"", "", ""}}));
+        ASSERT_CUDA_SUCCESS(MMAPIJpegSink::Create(sink, output_dir_.string(), {w, h, 3, {"", "", ""}}, batchSize));
 
         ASSERT_CUDA_SUCCESS(sink->Save(*data, *results));
 
-        // Data is deferred. We do NOT call Close().
-        EXPECT_FALSE(fs::exists(expected_file));
-
+        // Data is encoding asynchronously. We do NOT explicitly call Close().
         // The sink goes out of scope here, triggering the destructor.
     }
 
-    // Verify the destructor caught the unflushed data and wrote it synchronously
-    EXPECT_TRUE(fs::exists(expected_file)) << "Destructor failed to flush remaining data!";
+    // Verify the destructor caught the unflushed future tasks and joined them safely
+    EXPECT_TRUE(fs::exists(expected_file)) << "Destructor failed to join async threads and flush remaining data!";
     EXPECT_GT(fs::file_size(expected_file), 100);
 }
 

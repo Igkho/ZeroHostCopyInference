@@ -1,5 +1,5 @@
 #include "NVJpegSink.h"
-#include "NVJpegSinkKernels.h"
+#include "SinkKernels.h"
 #include "helpers.h"
 #include <numeric>
 #include <iostream>
@@ -7,7 +7,6 @@
 #include <filesystem>
 #include <sstream>
 #include <iomanip>
-//#include "DetectionRaw.h"
 #include <future>
 
 namespace fs = std::filesystem;
@@ -72,7 +71,6 @@ CudaError NVJpegSink::FlushBufferToDisk(EncodeState& buf) {
     }
 
     // 1. Sync: Wait for GPU to finish DMA writing to this buffer
-    // Wrapping in CUDA_CALL_NO_THROW as this is also called from the destructor
     CUDA_TRY(cudaEventSynchronize(*buf.dma_complete_event));
 
     // 2. Dispatch Parallel SSD Writes
@@ -152,15 +150,6 @@ CudaError NVJpegSink::Save(BatchData &data, BatchDetections &results) {
     if (data.batchSize == 0) {
         return CudaError();
     }
-    // EncodeState& buf = staging_buffers_[active_buffer_];
-
-    // // 1. I/O: Write previous batch to SSD while the GPU computes the current batch
-    // CUDA_TRY(FlushBufferToDisk(buf));
-
-    // // 2. Setup CURRENT batch metadata
-    // buf.batch_size = data.batchSize;
-    // buf.filenames.clear();
-    // buf.has_data = true; // Mark true so it gets flushed on the NEXT cycle or destructor
 
     int prev_buffer_idx = (active_buffer_ + 1) & 0x01;
     EncodeState& buf = staging_buffers_[active_buffer_];

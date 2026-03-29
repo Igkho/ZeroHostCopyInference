@@ -1,8 +1,8 @@
 # High-Performance Zero-Host-Copy Inference Pipeline (C++/CUDA)
 
 ![Status](https://img.shields.io/badge/Status-Active_Development-yellow)
-![Platform](https://img.shields.io/badge/Platform-Linux_x64-blue)
-![Porting](https://img.shields.io/badge/Porting-Windows_%7C_Jetson_Orin-yellow)
+![Platform](https://img.shields.io/badge/Platform-Linux_x64_%7C_Jetson_Orin-blue)
+![Porting](https://img.shields.io/badge/Porting-Windows-yellow)
 ![Language](https://img.shields.io/badge/Language-C%2B%2B17_%7C_CUDA-green)
 
 **Author:** Igor Khozhanov
@@ -14,7 +14,8 @@
 ---
 
 ## 🎬 Real-Time Output
-*Processing 1440p Video Stream @ ~165 FPS on RTX 3060 Ti.*
+*Processing input with Yolov8m 1024x1024 INT8 @ ~165 FPS on RTX 3060 Ti and @ ~38 FPS on Jetson Orin Nano.*
+
 
 ![Crop & Weed Detection Demo](video/Moving_annotated.gif)
 
@@ -36,8 +37,8 @@ The previous phases **Phase 3 (Integration)** and **Phase 4 (Functional Inferenc
 | **TensorRT Detector** | ✅ **Stable** | Engine builder & `enqueueV3` implemented. |
 | **Object Tracker** | ✅ **Stable** | Kernels for position prediction, IOU matching, velocity filtering. |
 | **Post-Processing** | ✅ **Stable** | Custom CUDA kernels for YOLOv8 output decoding & NMS. |
+| **Jetson Port** | ✅ **Stable** | Native CUDA/TRT pipeline operational. Integrated Jetson Multimedia API (MMAPI) for hardware-accelerated JPEG decoding/encoding. |
 | **Windows Port** | 🚧 **WIP** | Adapting CMake & CUDA |
-| **Jetson Port** | 🚧 **WIP** | Native CUDA/TRT pipeline operational. Migration to hardware MMAPI pending to resolve NVJpeg/TRT silicon contention. |
 
 ---
 
@@ -62,10 +63,10 @@ The model is hosted in the research repository (AGPL-3.0):
 
 ### Supported Platforms
 * ✅ Linux x64 (Verified on Ubuntu 24.04 / RTX 3060 Ti)
+* ✅ Nvidia Jetson Orin Nano (Verified on Ubuntu 22.04 / JetPack 6.0)
 * 🚧 Windows 10/11 (Build scripts implemented, pending validation)
-* 🚧 Nvidia Jetson Orin (Verified on Ubuntu 22.04 / JetPack 6.0)
 
-Note: Jetson currently requires passing a directory of images (`-i ./frames/`) instead of an `.mp4` file while MMAPI hardware decoding is being implemented.
+Note: Jetson currently requires passing a directory of images (`-i ./frames/`) instead of an `.mp4` file.
 
 ## Dependencies
 
@@ -182,11 +183,13 @@ docker run --rm --gpus all \
 
 ## 🚀 Performance Benchmarks
 
-Benchmarks performed on **NVIDIA RTX 3060 Ti**.
-**Input:** 1440p Video Stream.
+Benchmarks performed on **NVIDIA RTX 3060 Ti** and on **NVIDIA Jetson Orin Nano**
+
+**Input:** 1440p Video Stream or directory of jpeg images.
+
 **Model:** YOLOv8 Medium (YOLOv8m) @ 1024x1024 Resolution.
 
-### 1. Infrastructure Ceiling (Stub Mode)
+### 1. Infrastructure Ceiling (Stub Mode) - RTX 3060 Ti
 To measure the raw overhead of the pipeline architecture (I/O latency), a pass-through (Stub) detector should be used.
 
 | Metric | Result | Notes |
@@ -194,7 +197,7 @@ To measure the raw overhead of the pipeline architecture (I/O latency), a pass-t
 | **Throughput** | **~300 FPS** | Maximum theoretical speed without AI model. |
 | **Latency** | **3.3 ms** | Combined Decoding + Memory Management overhead. |
 
-### 2. Real-World Inference (TensorRT INT8 Mode)
+### 2. Real-World Inference (TensorRT INT8 Mode) - RTX 3060 Ti
 Running **YOLOv8m** (Explicitly Quantized INT8) with full object tracking and NVJpeg output.
 
 | Metric | Result | Notes |
@@ -208,10 +211,8 @@ Running **YOLOv8m** (Explicitly Quantized INT8) with full object tracking and NV
 * **Storage (Sink):** ~2.10 ms/frame (20.43% load)
 
 
-### 3. Backend & Precision Comparison
+### 3. Backend & Precision Comparison - RTX 3060 Ti
 Both **TensorRT** (Highly Optimized) and **ONNX Runtime** (Generic Compatibility) are supported.
-
-**Scenario:** 1024x1024 Input Resolution on RTX 3060 Ti.
 
 | Backend / Precision | FPS | Latency (Inference) | Speedup Factor | Notes |
 | :--- | :--- | :--- | :--- | :--- |
@@ -219,23 +220,20 @@ Both **TensorRT** (Highly Optimized) and **ONNX Runtime** (Generic Compatibility
 | **TensorRT (FP16)** | **~118.1** | **~5.58 ms** | **1.0x (Ref)** | Baseline hardware acceleration. |
 | **ONNX Runtime** | **~38.4** | **~24.2 ms** | **0.33x** | Generic execution. Useful for testing new models. |
 
-### 4. Edge Performance (Jetson Orin Nano 8GB)
-*Initial port performance. Optimization phase in progress.*
+### 4. Edge Performance - Jetson Orin Nano 8GB
 
 **Scenario:** 1440x1440 Input Resolution (Directory of JPEG frames).
 
-**Model:** YOLOv8 Medium (YOLOv8m) 1024x1024 @ FP16.
+**Model:** YOLOv8 Medium (YOLOv8m) 1024x1024.
+
+*ONNX Runtime** is not supported.
 
 | Metric | Result, FPS | Notes |
 | :--- | :--- | :--- |
-| **Infrastructure Ceiling (Stub)** | **~77.5** | Maximum pipeline speed utilizing `NVJpeg` software decode/encode. |
-| **TensorRT (FP16)** | **~22.2** | Baseline hardware acceleration. |
-| **TensorRT (INT8)** | **~31.4** | Optimized engine. Inference latency dropped to ~27.4ms. |
-
-**Current Bottleneck Analysis (Why 31 FPS?):**
-Currently, the `NVJpegSource` and `NVJpegSink` rely on the Jetson's CUDA cores. When the TensorRT engine engages, it fiercely competes with the decoders for the same unified silicon, slowing down decode/encode times. 
-
-**Next Steps (Phase 5):** Pending the migration of the Source and Sink to the Jetson Multimedia API (MMAPI). This will offload image processing to dedicated hardware ASICs (NVDEC/NVENC/NVJPEG), isolating TensorRT on the CUDA cores and drastically raising the total FPS.
+| **Infrastructure Ceiling (Stub)** | **~160** | Maximum pipeline speed utilizing dedicated MMAPI hardware engine (no model). |
+| **TensorRT (FP16) + NVJpeg** | **~22.2** | Baseline hardware acceleration (CUDA NVJPEG). |
+| **TensorRT (INT8) + NVJpeg** | **~31.4** | Fast inference, with decode/encode tasks using  CUDA SMs. |
+| **TensorRT (INT8) + MMAPI** | **~38.0** | New Peak. I/O offloaded to dedicated ASICs. |
 
 ## ⚖️ License
 
