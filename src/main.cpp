@@ -38,7 +38,7 @@ enum class BackendType {
     STUB,
 };
 
-constexpr const char* TOOL_VERSION = "1.0.0";
+constexpr const char* TOOL_VERSION = "1.0.1";
 
 int main(int argc, char** argv) {
     CLI::App app{"ZeroHostCopy Inference Tool"};

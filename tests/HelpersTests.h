@@ -34,11 +34,13 @@ TEST(CudaErrorTest, ReportsCudaFailure) {
     EXPECT_NE(err.Text().find("out of memory"), std::string::npos);
 }
 
+#if !defined(PLATFORM_JETSON) || defined(USE_JETSON_CUDA_JPEG)
 TEST(CudaErrorTest, ReportsNvjpegFailure) {
     nvjpegStatus_t raw_err = NVJPEG_STATUS_INTERNAL_ERROR;
     EXPECT_TRUE(CudaError::IsFailure(raw_err));
     EXPECT_STREQ(CudaError::GetErrorString(raw_err), "Internal Error");
 }
+#endif
 
 TEST(CudaErrorTest, ErrorChaining) {
     CudaError root("Root", cudaErrorInitializationError);

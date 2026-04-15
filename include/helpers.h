@@ -6,7 +6,9 @@
 #include <filesystem>
 #include <vector>
 #include <cuda_runtime_api.h>
+#if !defined(PLATFORM_JETSON) || defined(USE_JETSON_CUDA_JPEG)
 #include <nvjpeg.h>
+#endif
 #if defined(PLATFORM_JETSON) && !defined(USE_JETSON_CUDA_JPEG)
 #include <nvbufsurftransform.h>
 #endif
@@ -27,7 +29,7 @@ public:
     static inline const char * GetErrorString(cudaError_t err) {
         return cudaGetErrorString(err);
     }
-
+#if !defined(PLATFORM_JETSON) || defined(USE_JETSON_CUDA_JPEG)
     static inline const char * GetErrorString(nvjpegStatus_t err) {
         // nvJPEG often doesn't have a standardized string function in older toolkits
         switch(err) {
@@ -43,7 +45,7 @@ public:
         default: return "Unknown NVJPEG Error";
         }
     }
-
+#endif
 #if defined(PLATFORM_JETSON) && !defined(USE_JETSON_CUDA_JPEG)
     // Jetson Hardware Transform Enums
     static inline const char * GetErrorString(NvBufSurfTransform_Error err) {
@@ -73,9 +75,11 @@ public:
         return err != cudaSuccess;
     }
 
+#if !defined(PLATFORM_JETSON) || defined(USE_JETSON_CUDA_JPEG)
     static bool IsFailure(nvjpegStatus_t err) {
         return err != NVJPEG_STATUS_SUCCESS;
     }
+#endif
 
 #if defined(PLATFORM_JETSON) && !defined(USE_JETSON_CUDA_JPEG)
     static bool IsFailure(NvBufSurfTransform_Error err) {

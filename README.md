@@ -1,8 +1,7 @@
 # High-Performance Zero-Host-Copy Inference Pipeline (C++/CUDA)
 
-![Status](https://img.shields.io/badge/Status-Active_Development-yellow)
+![Status](https://img.shields.io/badge/Status-Stable-green)
 ![Platform](https://img.shields.io/badge/Platform-Linux_x64_%7C_Jetson_Orin-blue)
-![Porting](https://img.shields.io/badge/Porting-Windows-yellow)
 ![Language](https://img.shields.io/badge/Language-C%2B%2B17_%7C_CUDA-green)
 
 **Author:** Igor Khozhanov
@@ -21,11 +20,14 @@
 
 ---
 
-## ⚠️ Current Development Status: Phase 5 (Porting)
+## 🏗️ Architecture & Project Status
 
-The previous phases **Phase 3 (Integration)** and **Phase 4 (Functional Inference)** completed. The pipeline now supports full end-to-end detection and tracking using TensorRT and ONNX backends with mathematically verified kernels.
+This project serves as a comprehensive demonstration of a high-performance **Zero-Host-Copy** video inference pipeline, designed to minimize CPU-GPU bandwidth bottlenecks. The architecture ensures that data remains entirely on the VRAM from decoding through inference to post-processing. 
 
-**Note for Reviewers:** This repository is currently under active development. The pipeline is being implemented in stages to ensure memory safety and zero-host-copy verification.
+The pipeline supports full end-to-end detection and tracking using TensorRT and ONNX backends, powered by mathematically verified custom CUDA kernels.
+
+* **Hardware-in-the-Loop CI/CD:** Fully automated multi-architecture Docker build and testing pipeline via GitHub Actions. Utilizes self-hosted RTX 3060 Ti (x64) and Jetson Orin Nano (ARM64) runners with persistent host-level TensorRT engine caching to accelerate GPU unit testing.
+
 
 | Module / Stage | Status | Notes |
 | :--- | :--- | :--- |
@@ -38,12 +40,8 @@ The previous phases **Phase 3 (Integration)** and **Phase 4 (Functional Inferenc
 | **Object Tracker** | ✅ **Stable** | Kernels for position prediction, IOU matching, velocity filtering. |
 | **Post-Processing** | ✅ **Stable** | Custom CUDA kernels for YOLOv8 output decoding & NMS. |
 | **Jetson Port** | ✅ **Stable** | Native CUDA/TRT pipeline operational. Integrated Jetson Multimedia API (MMAPI) for hardware-accelerated JPEG decoding/encoding. |
-| **Windows Port** | 🚧 **WIP** | Adapting CMake & CUDA |
 
 ---
-
-## Project Overview
-This project implements a high-performance video inference pipeline designed to minimize CPU-GPU bandwidth usage. Unlike standard OpenCV implementations, this pipeline keeps data entirely on the VRAM (Zero-Host-Copy) from decoding to inference.
 
 ## 📥 Model Setup (Required)
 
@@ -57,34 +55,23 @@ The model is hosted in the research repository (AGPL-3.0):
 * **Download:** [`best_int8.onnx`](https://github.com/Igkho/CropAndWeedDetection/releases) 
 * **License:** AGPL-3.0 (Derived from Ultralytics YOLOv8)
 
-## How to Build & Test (Current Version)
-
-## Compatibility
+## ⚙️ Compatibility & Dependencies
 
 ### Supported Platforms
 * ✅ Linux x64 (Verified on Ubuntu 24.04 / RTX 3060 Ti)
-* ✅ Nvidia Jetson Orin Nano (Verified on Ubuntu 22.04 / JetPack 6.0)
-* 🚧 Windows 10/11 (Build scripts implemented, pending validation)
+* ✅ Nvidia Jetson Orin Nano (Verified on Ubuntu 22.04 / JetPack 6.1)
 
 Note: Jetson currently requires passing a directory of images (`-i ./frames/`) instead of an `.mp4` file.
 
-## Dependencies
+### Dependencies (For Native Compilation)
 
-### Build Time
 * CMake 3.19+
 * CUDA Toolkit (12.x)
 * TensorRT 10.x+
-* **FFmpeg**: Required.
-    * *Linux Users:* Install via package manager or build from source with `--enable-shared`.
+* **cuDNN 8.x/9.x**: Required at runtime if utilizing the ONNX Runtime CUDA Execution Provider. *(Ensure `libcudnn.so` is in your `LD_LIBRARY_PATH` or installed system-wide).*
+* **FFmpeg**: Required.  *(Linux x64 Users: Install via 'apt' or build from source with `--enable-shared.*
 
-### Runtime Requirements
-* **NVIDIA cuDNN**: Required by ONNX Runtime CUDA provider. 
-    * *Note: 
-    Ensure `libcudnn.so` is in your `LD_LIBRARY_PATH` or installed system-wide.*
-    
-## Compilation & Run
-
-### Build & Run (PC Native - Linux x64)
+## Build & Run (PC Native - Linux x64)
 
 ```bash
 git clone https://github.com/Igkho/ZeroHostCopyInference.git
@@ -110,8 +97,7 @@ make -j$(nproc)
 ./ZeroCopyInferenceTests --model best_int8.onnx
 ```
 
-### Build & Run (Jetson Native - Recommended)
-Building natively on the Jetson Orin ensures the compiler has direct access to the specialized L4T hardware headers (nvjpeg.h) and TensorRT libraries.
+## Build & Run (Jetson Native)
 
 ```bash
 git clone https://github.com/Igkho/ZeroHostCopyInference.git
@@ -139,7 +125,7 @@ Note: Jetson requires a directory of frames (fetched automatically by cmake) as 
 ```
 
 
-### Quick Start (Docker - Linux x64)
+## Quick Start (Docker - Linux x64)
 No C++ compilation required. Requires NVIDIA Container Toolkit.
 
 ### Run pipeline
@@ -156,7 +142,7 @@ bash download_frames_data.sh
 docker run --rm --gpus all \
   -v $(pwd)/video:/app/video \
   -v $(pwd)/models:/app/models \
-  ghcr.io/igkho/zerohostcopyinference:main \
+  ghcr.io/igkho/zerohostcopyinference:latest-x64 \
   -i /app/video/Moving.mp4 \
   --backend trt \
   --model /app/models/best_int8.onnx \
@@ -164,7 +150,7 @@ docker run --rm --gpus all \
   -o /app/video/output
 ```
 
-### Run tests
+### Run GPU unit tests
 
 ```bash
 git clone https://github.com/Igkho/ZeroHostCopyInference.git
@@ -177,7 +163,58 @@ docker run --rm --gpus all \
   -v $(pwd)/video:/app/video \
   -v $(pwd)/models:/app/models \
   --entrypoint /app/build/ZeroCopyInferenceTests \
-    ghcr.io/igkho/zerohostcopyinference:main \
+    ghcr.io/igkho/zerohostcopyinference:latest-x64 \
+  --model /app/models/best_int8.onnx
+```
+
+## Quick Start (Docker - Jetson Orin Nano)
+Requires the --runtime=nvidia flag to access L4T hardware encoders and UMA.
+
+⚠️ Critical Note for Jetson 8GB Users: Compiling the TensorRT .engine from the .onnx model requires significant temporary UMA memory. If this is your first time running the pipeline (and the engine is not yet cached), you must configure an 8GB swap file on your Jetson host OS to prevent Out-Of-Memory (OOM) crashes during the engine profiling phase.
+
+```bash
+sudo fallocate -l 8G /mnt/8GB.swap
+sudo mkswap /mnt/8GB.swap
+sudo swapon /mnt/8GB.swap
+```
+
+
+### Run pipeline
+
+```bash
+
+git clone https://github.com/Igkho/ZeroHostCopyInference.git
+cd ZeroHostCopyInference
+
+mkdir models
+mv ~/Downloads/best_int8.onnx ./models/
+bash download_frames_data.sh
+
+docker run --rm --runtime=nvidia \
+  -v $(pwd)/frames:/app/frames \
+  -v $(pwd)/models:/app/models \
+  ghcr.io/igkho/zerohostcopyinference:latest-jetson \
+  -i /app/frames/ \
+  --backend trt \
+  --model /app/models/best_int8.onnx \
+  -b 16 \
+  -o /app/frames/output
+```
+
+### Run GPU unit tests
+
+```bash
+git clone https://github.com/Igkho/ZeroHostCopyInference.git
+cd ZeroHostCopyInference
+
+mkdir models
+mv ~/Downloads/best_int8.onnx ./models/
+
+docker run --rm --runtime=nvidia \
+  -v $(pwd)/frames:/app/frames \
+  -v $(pwd)/models:/app/models \
+  --entrypoint /app/build/ZeroCopyInferenceTests \
+    ghcr.io/igkho/zerohostcopyinference:latest-jetson \
   --model /app/models/best_int8.onnx
 ```
 

@@ -13,7 +13,7 @@ struct NvBufSurface;
 namespace cropandweed {
 
 struct DecodeResource {
-    static constexpr int HW_DECODERS_PER_BUFFER = 8;
+    static constexpr int HW_DECODERS_PER_BUFFER = 2;
     std::vector<uint8_t> raw_buffer;
     int block_linear_fd = -1;
     NvBufSurface* pitch_linear_surf = nullptr;

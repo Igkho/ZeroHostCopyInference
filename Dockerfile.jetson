@@ -1,0 +1,51 @@
+# Use the TensorRT 10.3 development image for JetPack 6.1 (Includes CUDA 12.6)
+FROM nvcr.io/nvidia/l4t-tensorrt:r10.3.0-devel
+
+# Prevent apt-get from prompting for timezone/keyboard configurations
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 1. Fetch NVIDIA's new GPG public key for JetPack 6.1 (r36.4)
+# We must do this before adding the repositories so apt-get can verify the signatures.
+RUN apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 0D296FFB880FB004
+
+# 2. Fix APT Repositories for JetPack 6.0 Production (r36.4)
+# The base image defaults to the r36.0 Developer Preview and misses the Orin (t234) hardware repo.
+# We must explicitly add both to access the MMAPI packages.
+RUN echo "deb https://repo.download.nvidia.com/jetson/common r36.4 main" > /etc/apt/sources.list.d/nvidia-l4t-apt-source.list && \
+    echo "deb https://repo.download.nvidia.com/jetson/t234 r36.4 main" >> /etc/apt/sources.list.d/nvidia-l4t-apt-source.list
+
+# 3. Bypass L4T Hardware checks during Docker build
+# nvidia-l4t-core attempts to verify hardware firmware during install.
+# Since Docker isolates /proc, we use this official flag to strictly disable the check.
+RUN mkdir -p /opt/nvidia/l4t-packages/ && \
+    touch /opt/nvidia/l4t-packages/.nv-l4t-disable-boot-fw-update-in-preinstall
+
+# 4. Install System Dependencies and MMAPI
+# Force dpkg to silently accept default config files without prompting
+RUN apt-get update && apt-get install -y \
+    -o Dpkg::Options::="--force-confdef" \
+    -o Dpkg::Options::="--force-confold" \
+    pkg-config \
+    cmake \
+    wget \   
+    unzip \
+    nvidia-l4t-jetson-multimedia-api \
+    libv4l-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# 5. Upgrade CMake to the latest version using Python PIP
+RUN pip3 install --upgrade cmake
+
+# 6. Copy Project Files
+WORKDIR /app
+COPY . .
+
+# 7. Build The Project
+# Ensure we turn off test data fetching to let the CI pipeline handle it
+RUN mkdir build && cd build \
+    && cmake .. -DCMAKE_BUILD_TYPE=Release -DFETCH_TEST_DATA=OFF \
+    && make -j$(nproc)
+
+# 8. Set Entrypoint
+ENTRYPOINT ["./build/ZeroCopyInference"]
+CMD ["--help"]

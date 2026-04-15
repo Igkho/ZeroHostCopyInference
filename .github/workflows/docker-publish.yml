@@ -9,9 +9,11 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build-test-push:
-    runs-on: self-hosted
-
+  # ==========================================
+  # JOB 1: Linux x64 (Runs on PC Self-Hosted)
+  # ==========================================
+  build-x64:
+    runs-on: [self-hosted, x64] 
     permissions:
       contents: read
       packages: write
@@ -19,11 +21,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
-
-      - name: Download ONNX Model
-        run: |
-          mkdir -p models
-          wget https://github.com/Igkho/CropAndWeedDetection/releases/download/1.0.1-int8-weights/best_int8.onnx -O models/best_int8.onnx
 
       - name: Log in to the Container registry
         uses: docker/login-action@v2
@@ -37,30 +34,125 @@ jobs:
         uses: docker/metadata-action@v4
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: type=raw,value=latest-x64
 
-      - name: Build Docker image locally
+      - name: Build Docker image locally (x64)
         uses: docker/build-push-action@v4
         with:
           context: .
+          file: Dockerfile
           load: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-      - name: Run GPU Unit Tests
+      - name: Setup Persistent Host Cache & Download Model (x64)
+        # Creates a permanent folder on the x64 host outside the GitHub workspace
+        run: |
+          mkdir -p /home/$USER/model_cache
+          if [ ! -f /home/$USER/model_cache/best_int8.onnx ]; then
+            echo "Downloading ONNX model..."
+            wget https://github.com/Igkho/CropAndWeedDetection/releases/download/1.0.1-int8-weights/best_int8.onnx -O /home/$USER/model_cache/best_int8.onnx
+          else
+            echo "ONNX model already cached."
+          fi
+
+      - name: Run GPU Unit Tests on x64
         run: |
           IMAGE_TAG="${{ steps.meta.outputs.tags }}"
           
+          # PC Docker uses standard --gpus all
+          # Mount the persistent host cache to /app/models inside the container
           docker run --rm --gpus all \
-            -v ${{ github.workspace }}/models:/app/models \
+            -v /home/$USER/model_cache:/app/models \
             --entrypoint /app/build/ZeroCopyInferenceTests \
             $IMAGE_TAG \
             --model /app/models/best_int8.onnx
 
-      - name: Push Docker image
+      - name: Push Docker image (x64)
         if: success()
         uses: docker/build-push-action@v4
         with:
           context: .
+          file: Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+      
+      - name: Clean up dangling Docker images on x64
+        if: always() # Ensures it runs even if tests fail
+        run: |
+          docker image prune -f
+
+  # ==========================================
+  # JOB 2: Jetson Orin (Runs on Jetson Self-Hosted)
+  # ==========================================
+  build-jetson:
+    runs-on: [self-hosted, jetson] 
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: type=raw,value=latest-jetson 
+
+      - name: Build Docker image locally (Jetson)
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: Dockerfile.jetson
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Setup Persistent Host Cache & Download Model
+        # Use a permanent folder outside the workspace so it survives workspace cleanups.
+        # Download the ONNX model if it isn't already there.
+        run: |
+          mkdir -p /home/$USER/model_cache
+          if [ ! -f /home/$USER/model_cache/best_int8.onnx ]; then
+            echo "Downloading ONNX model..."
+            wget https://github.com/Igkho/CropAndWeedDetection/releases/download/1.0.1-int8-weights/best_int8.onnx -O /home/$USER/model_cache/best_int8.onnx
+          else
+            echo "ONNX model already cached."
+          fi
+
+      - name: Run GPU Unit Tests on Jetson
+        run: |
+          IMAGE_TAG="${{ steps.meta.outputs.tags }}"
+          # Mount the persistent host cache to /app/models inside the container.
+          docker run --rm --runtime=nvidia \
+            -v /home/$USER/model_cache:/app/models \
+            --entrypoint /app/build/ZeroCopyInferenceTests \
+            $IMAGE_TAG \
+            --model /app/models/best_int8.onnx
+
+      - name: Push Docker image (Jetson)
+        if: success()
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: Dockerfile.jetson
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Clean up dangling Docker images on Jetson
+        if: always() # Runs even if previous steps fail
+        run: |
+          # Removes all images that have no tag (<none>:<none>)
+          docker image prune -f
