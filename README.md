@@ -3,6 +3,7 @@
 ![Status](https://img.shields.io/badge/Status-Stable-green)
 ![Platform](https://img.shields.io/badge/Platform-Linux_x64_%7C_Jetson_Orin-blue)
 ![Language](https://img.shields.io/badge/Language-C%2B%2B17_%7C_CUDA-green)
+[![AI Evaluation](https://img.shields.io/badge/AI_Code_Analysis-Gemini_3.6_Flash-purple)](https://app.igkho-systems.dev/)
 
 **Author:** Igor Khozhanov
 
@@ -271,6 +272,15 @@ Both **TensorRT** (Highly Optimized) and **ONNX Runtime** (Generic Compatibility
 | **TensorRT (FP16) + NVJpeg** | **~22.2** | Baseline hardware acceleration (CUDA NVJPEG). |
 | **TensorRT (INT8) + NVJpeg** | **~31.4** | Fast inference, with decode/encode tasks using  CUDA SMs. |
 | **TensorRT (INT8) + MMAPI** | **~38.0** | New Peak. I/O offloaded to dedicated ASICs. |
+
+## 🧠 Automated AI Technical Evaluation
+
+Reviewing candidate repositories is time-consuming. To streamline the evaluation process, I built the **[Technical Profile AI Analyzer](https://app.igkho-systems.dev/)**. 
+
+This self-service tool automatically ingests the raw code from this project (along with my other primary repositories) and analyzes it using Google's Gemini 3.6 Flash in High-Thinking mode. The underlying prompt architecture forces the LLM to act as a highly critical Lead Systems Engineer, extracting explicitly verified skills, estimating architectural maturity, identifying potential blind spots for interview probes, and offering the final brief as a downloadable PDF report. 
+
+👉 **[Run the AI Code Analysis Here](https://app.igkho-systems.dev/)**
+> **Note:** The live demo is hosted on a VPS. Due to current ISP routing restrictions, connections from within Russia may experience timeouts and require a VPN. If you are unable to access the live site, you can run the analyzer locally. See the instructions in the **[TechProfileAI repository](https://github.com/Igkho/TechProfileAI)**.
 
 ## ⚖️ License
 
