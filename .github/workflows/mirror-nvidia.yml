@@ -1,0 +1,38 @@
+name: Mirror NVIDIA Image
+
+on:
+  workflow_dispatch: # Allows you to trigger this manually from the GitHub UI
+
+jobs:
+  mirror-image:
+    runs-on: ubuntu-latest # Runs on GitHub's cloud, avoiding the IP ban
+    permissions:
+      packages: write
+      contents: read
+
+    steps:
+      - name: Log in to NVIDIA NGC
+        uses: docker/login-action@v2
+        with:
+          registry: nvcr.io
+          username: $oauthtoken
+          password: ${{ secrets.NGC_API_KEY }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull, Tag, and Push Image
+        run: |
+          # --- x64 Image ---
+          docker pull nvcr.io/nvidia/tensorrt:24.07-py3
+          docker tag nvcr.io/nvidia/tensorrt:24.07-py3 ghcr.io/igkho/tensorrt:24.07-py3
+          docker push ghcr.io/igkho/tensorrt:24.07-py3
+
+          # --- Jetson Image ---
+          docker pull nvcr.io/nvidia/l4t-tensorrt:r10.3.0-devel
+          docker tag nvcr.io/nvidia/l4t-tensorrt:r10.3.0-devel ghcr.io/igkho/l4t-tensorrt:r10.3.0-devel
+          docker push ghcr.io/igkho/l4t-tensorrt:r10.3.0-devel

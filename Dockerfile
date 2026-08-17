@@ -1,5 +1,5 @@
 # Use NVIDIA's official image with TensorRT and CUDA pre-installed
-FROM nvcr.io/nvidia/tensorrt:24.07-py3
+FROM ghcr.io/igkho/tensorrt:24.07-py3
 
 # 1. Install System Dependencies (FFMpeg, CMake)
 RUN apt-get update && apt-get install -y \

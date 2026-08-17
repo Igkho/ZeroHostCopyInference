@@ -1,5 +1,5 @@
 # Use the TensorRT 10.3 development image for JetPack 6.1 (Includes CUDA 12.6)
-FROM nvcr.io/nvidia/l4t-tensorrt:r10.3.0-devel
+FROM ghcr.io/igkho/l4t-tensorrt:r10.3.0-devel
 
 # Prevent apt-get from prompting for timezone/keyboard configurations
 ENV DEBIAN_FRONTEND=noninteractive
