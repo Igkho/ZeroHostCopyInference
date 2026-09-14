@@ -103,9 +103,10 @@ CudaError OnnxDetector::Init(const std::string& modelPath) {
         CUDA_TRY(res.rawOutput.reserve(rawVol, *cuda_stream_));
         CUDA_TRY(res.candidates.reserve(maxCandidates, *cuda_stream_));
         CUDA_TRY(res.candidateCount.reserve(1, *cuda_stream_));
-
-        // Zero out counts safely
         CUDA_TRY(res.candidateCount.fill(0, *cuda_stream_));
+        res.candidateCountHost.resize(1, 0);
+        CUDA_TRY(res.sortWorkspace.reserve(7000 * BatchData::MAX_BATCH_SIZE, *cuda_stream_));
+        CUDA_TRY(res.nmsMask.reserve(maxCandidates, *cuda_stream_));
     }
 
     std::cout << "[OnnxDetector] Memory pool initialized (Depth: " << POOL_SIZE << ")" << std::endl;
@@ -233,9 +234,11 @@ CudaError OnnxDetector::Detect(const BatchData& input, BatchDetections &output) 
     CUDA_TRY(RunNMS(
         res.candidates,
         res.candidateCount,
+        res.candidateCountHost,
         output.data,
         output.counts,
         res.nmsMask,
+        res.sortWorkspace,
         0.45f, // IOU threshold
         BatchDetections::MAX_DETECTIONS_PER_FRAME, // Stride
         validBatchSize,

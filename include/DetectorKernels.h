@@ -27,9 +27,11 @@ CudaError DecodeAndFilter(const Block<float> &d_output,
 // Runs NMS and Unpacks results into strided buffer [Batch0][Batch1]...
 CudaError RunNMS(TypedBlock<DetectionRaw> &candidateBuffer,
                  BoundaryBlock<int> &candidateCountBuffer,
+                 std::vector<int> &candidateCountHost,
                  BoundaryTypedBlock<DetectionRaw> &finalOutputBuffer,
                  BoundaryBlock<int> &finalOutputCount,
                  Block<uint8_t> &maskBuffer,
+                 Block<uint8_t> &sortWorkspace,
                  float nmsThreshold,
                  int maxOutputPerBatch,       // The stride (MAX_DETECTIONS_PER_FRAME)
                  int batchSize,

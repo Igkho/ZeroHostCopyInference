@@ -1,10 +1,7 @@
 #include "DetectorKernels.h"
 #include "helpers.h"
 #include "DetectionRaw.h"
-
-#include <thrust/sort.h>
-#include <thrust/execution_policy.h>
-#include <thrust/device_ptr.h>
+#include <cub/device/device_merge_sort.cuh>
 
 namespace cropandweed {
 
@@ -175,9 +172,11 @@ CudaError DecodeAndFilter(const Block<float>& d_output,
 
 CudaError RunNMS(TypedBlock<DetectionRaw>& candidateBuffer,
                  BoundaryBlock<int> &candidateCountBuffer,
+                 std::vector<int> &candidateCountHost,
                  BoundaryTypedBlock<DetectionRaw> &finalOutputBuffer,
                  BoundaryBlock<int> &finalOutputCounts,
                  Block<uint8_t>& maskBuffer,
+                 Block<uint8_t> &sortWorkspace,
                  float nmsThreshold,
                  int maxOutputPerBatch,
                  int batchSize,
@@ -189,11 +188,11 @@ CudaError RunNMS(TypedBlock<DetectionRaw>& candidateBuffer,
     }
 
     // 1. Get Count (Async copy)
-    std::vector<int> count_v;
-    CUDA_TRY(candidateCountBuffer.to_vector(count_v, stream));
+    // std::vector<int> count_v;
+    CUDA_TRY(candidateCountBuffer.to_vector(candidateCountHost, stream));
 
     int maxCandidates = candidateBuffer.size();
-    int count = std::min(count_v[0], maxCandidates);
+    int count = std::min(candidateCountHost[0], maxCandidates);
 
     // Reset the final counts for all batches to 0
     CUDA_TRY(finalOutputCounts.fill(0, stream));
@@ -204,14 +203,25 @@ CudaError RunNMS(TypedBlock<DetectionRaw>& candidateBuffer,
     auto* rawPtr = candidateBuffer.data();
     auto* outPtr = finalOutputBuffer.data();
 
-    // 2. Sort Candidates (Async on Stream)
-    thrust::device_ptr<DetectionRaw> ptr(rawPtr);
-    thrust::sort(thrust::cuda::par.on(stream), ptr, ptr + count, DetectComparator());
+    // Zero-Allocation Sort using CUB
+    size_t temp_storage_bytes = 0;
+    // temp_storage_bytes = sortWorkspace.capacity();
+    // Pass nullptr to query the exact workspace size required
+    cub::DeviceMergeSort::SortKeys(0, temp_storage_bytes, rawPtr,
+                                   count, DetectComparator(), stream);
+    // Ensure sortWorkspace has enough capacity.
+    if (temp_storage_bytes > sortWorkspace.capacity()) {
+        CUDA_TRY(sortWorkspace.reserve(std::max(temp_storage_bytes, sortWorkspace.capacity() * 2),
+                                       stream));
+    }
+    // Execute the actual sort into our secondary buffer
+    cub::DeviceMergeSort::SortKeys(sortWorkspace.data(), temp_storage_bytes, rawPtr,
+                                   count, DetectComparator(), stream);
     CUDA_CHECK_KERNEL(stream);
 
     // 3. Run NMS Kernel
     // Temporary mask buffer (should ideally be passed in or cached)
-    maskBuffer.resize(count, stream);
+    CUDA_TRY(maskBuffer.resize(count, stream));
     auto* maskPtr = reinterpret_cast<bool*>(maskBuffer.data());
 
     KernelGrid grid(count);

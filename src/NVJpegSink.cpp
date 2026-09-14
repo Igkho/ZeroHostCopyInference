@@ -241,7 +241,6 @@ CudaError NVJpegSink::Save(BatchData &data, BatchDetections &results) {
     CUDA_TRY(cudaEventRecord(*buf.dma_complete_event, *cuda_stream_));
     CUDA_TRY(FlushBufferToDisk(prev_buf));
     active_buffer_ = prev_buffer_idx;
-
     return CudaError();
 }
 

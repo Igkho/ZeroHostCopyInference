@@ -1,9 +1,10 @@
 #include "ObjectTrackerKernels.h"
 #include <cstdio>
 #include "BatchDetections.h"
-#include <thrust/remove.h>
-#include <thrust/execution_policy.h>
-#include <thrust/device_ptr.h>
+//#include <thrust/remove.h>
+//#include <thrust/execution_policy.h>
+//#include <thrust/device_ptr.h>
+//#include <cub/device/device_select.cuh>
 
 namespace cropandweed {
 
@@ -243,6 +244,16 @@ __global__ void UpdateTracksKernel(DetectionRaw* __restrict__ detections,
     }
 }
 
+__inline__ __device__ float warp_reduce_sum(float val) {
+#pragma unroll
+    for (int s = 16; s >= 1; s >>= 1) {
+        val += __shfl_down_sync(0xFFFFFFFF, val, s);
+    }
+    return val;
+}
+
+constexpr int MAX_TRACK_LOOP_REPEAT_COUNT = 1000;
+
 __global__ void GhostAndCleanupKernel(TrackState* __restrict__ tracks,
                                       int* __restrict__ numTracks,
                                       DetectionRaw* __restrict__ detections,
@@ -254,78 +265,90 @@ __global__ void GhostAndCleanupKernel(TrackState* __restrict__ tracks,
                                       int height)
 {
     // Layout: [0]=SumVx, [1]=SumVy, [2]=Count
-    __shared__ float s_reduce[3];
+    extern __shared__ float s_reduce[];
 
+    int idx = threadIdx.x + blockDim.x * blockIdx.x;
     int tid = threadIdx.x;
-    // Since Grid Dim is 1, idx == tid
-    int idx = threadIdx.x;
+    int lane = tid & 0x1F;
+    int wid = tid >> 5;
     int totalTracks = *numTracks;
+    float svx = 0, svy = 0, cnt = 0;
 
-    // 1. Initialization (Thread 0 of Block)
-    if (tid == 0) {
-        s_reduce[0] = 0.0f;
-        s_reduce[1] = 0.0f;
-        s_reduce[2] = 0.0f;
-    }
-    __syncthreads();
-
-    // 2. Load and Accumulate (Local Registers -> Atomic Shared)
-    // We check idx against totalTracks to ensure valid memory access
-    if (idx < totalTracks) {
-        TrackState& t = tracks[idx];
-
-        // Only include mature, active tracks in the mean calculation
-        // Filter out -999 (dead) and very young tracks (age < 5) which might be noisy
+    // The grid sride loop
+    int sidx = idx;
+    int failsafe_1 = 0; // Universal Failsafe
+    while (sidx < totalTracks && failsafe_1 < MAX_TRACK_LOOP_REPEAT_COUNT) {
+        failsafe_1++;
+        TrackState& t = tracks[sidx];
         if (t.age != -999 && t.age >= 5) {
-            atomicAdd(&s_reduce[0], t.vx);
-            atomicAdd(&s_reduce[1], t.vy);
-            atomicAdd(&s_reduce[2], 1.0f);
+            svx += t.vx;
+            svy += t.vy;
+            cnt ++;
         }
+        sidx += gridDim.x * blockDim.x;
     }
 
-    // 3. Barrier: Wait for all threads in block to finish accumulation
+    // Reduce over warps and store the per-warp result to the shared memory
+    svx = warp_reduce_sum(svx);
+    svy = warp_reduce_sum(svy);
+    cnt = warp_reduce_sum(cnt);
+    if (lane == 0) {
+        s_reduce[wid * 3] = svx;
+        s_reduce[wid * 3 + 1] = svy;
+        s_reduce[wid * 3 + 2] = cnt;
+    }
     __syncthreads();
 
-    // 4. Calculate Mean (Thread 0)
-    __shared__ float s_meanVx;
-    __shared__ float s_meanVy;
-    __shared__ bool s_valid;
-
-    if (tid == 0) {
-        float count = s_reduce[2];
-        s_valid = (count > 2.0f); // Need at least 2 tracks for a meaningful average
-        if (s_valid) {
-            s_meanVx = s_reduce[0] / count;
-            s_meanVy = s_reduce[1] / count;
+    // Reduce the shared mem results on the warp 0, 1 and 2
+    // Then put the result in the beginning of shared mem
+    if (wid == 0) {
+        int num_warps = blockDim.x >> 5;
+        float vx = (lane < num_warps ? s_reduce[lane * 3] : 0);
+        vx = warp_reduce_sum(vx);
+        float vy = (lane < num_warps ? s_reduce[lane * 3 + 1] : 0);
+        vy = warp_reduce_sum(vy);
+        float vz = (lane < num_warps ? s_reduce[lane * 3 + 2] : 0);
+        vz = warp_reduce_sum(vz);
+        if (lane == 0) {
+            s_reduce[0] = vx;
+            s_reduce[1] = vy;
+            s_reduce[2] = vz;
         }
     }
-    __syncthreads(); // Barrier to broadcast mean
+    __syncthreads();
 
-    // 5. Filter Outliers (All threads)
-    if (idx < totalTracks) {
-        TrackState& t = tracks[idx];
+    // Spread the result over all threads of the block
+    bool s_valid = s_reduce[2] > 2.f; // At least 3 tracks are required for the meaningful average
+    if (s_valid) {
+        svx = s_reduce[0] / s_reduce[2];
+        svy = s_reduce[1] / s_reduce[2];
+    }
+
+    // Filter Outliers (All threads)
+    sidx = idx;
+    int failsafe_2 = 0; // Universal Failsafe
+    while (sidx < totalTracks && failsafe_2 < MAX_TRACK_LOOP_REPEAT_COUNT) {
+        failsafe_2++;
+        TrackState& t = tracks[sidx];
 
         // Check if we should filter this track
         // Note: s_valid check prevents filtering if the scene is empty
         if (s_valid && t.age != -999 && t.age >= 5) {
-            float devX = fabsf(t.vx - s_meanVx);
-            float devY = fabsf(t.vy - s_meanVy);
+            float devX = fabsf(t.vx - svx);
+            float devY = fabsf(t.vy - svy);
 
             if (devX > MEAN_VELOCITY_DEVIATION_MARGIN ||
                 devY > MEAN_VELOCITY_DEVIATION_MARGIN) {
                 t.age = -999; // Mark as dead
-                // Early exit for this thread as track is now dead
-                return;
             }
         }
         // Marking old for compaction
-        if (t.missedFrames > TRACKER_MAX_MISSED_FRAMES) {
+        if (t.age != -999 && t.missedFrames > TRACKER_MAX_MISSED_FRAMES) {
             t.age = -999;
-            return;
         }
 
         // If the center of the track has left the frame, kill it immediately.
-        if (t.x < 0 || t.y < 0 || t.x >= width || t.y >= height) {
+        if (t.age != -999 && (t.x < 0 || t.y < 0 || t.x >= width || t.y >= height)) {
             t.age = -999;
         }
 
@@ -348,11 +371,9 @@ __global__ void GhostAndCleanupKernel(TrackState* __restrict__ tracks,
                 }
                 g.class_id = (float)bestC;
                 g.score = maxP * 0.5f;
-//                g.class_id = -1.0f;
-//                g.score = 0.0f;
-//                g.score = abs(t.vx); //sqrtf(t.vx * t.vx + t.vy * t.vy) * 10;
             }
         }
+        sidx += gridDim.x * blockDim.x;
     }
 }
 
@@ -519,10 +540,10 @@ __global__ void DrawBoxesKernel(float* __restrict__ imageBatch,
     }
 }
 
-struct IsDeadTrack {
-    __host__ __device__
-        bool operator()(const TrackState& t) { return t.age == -999; }
-};
+// struct IsDeadTrack {
+//     __host__ __device__
+//         bool operator()(const TrackState& t) { return t.age == -999; }
+// };
 
 } // anonymous namespace
 
@@ -534,8 +555,10 @@ struct IsDeadTrack {
 CudaError TrackBatch(int batchIndex,
                      BoundaryTypedBlock<DetectionRaw> &detections,
                      BoundaryBlock<int> &countBuffer,
+                     std::vector<int> &countBufferHost,
                      TypedBlock<TrackState> &tracks,
                      Block<int> &trackCount,
+                     std::vector<int> &trackCountHost,
                      Block<int> &nextTrackId,
                      Block<int> &detectionMatches,
                      int stride,
@@ -559,16 +582,18 @@ CudaError TrackBatch(int batchIndex,
     CUDA_CHECK_KERNEL(stream);
 
     // Get Count for THIS batch (Async)
-    std::vector<int> currentDetCounts;
-    std::vector<int> currentTrackCounts;
+    // std::vector<int> currentDetCounts;
+    // std::vector<int> currentTrackCounts;
 
-    CUDA_TRY(countBuffer.to_vector(currentDetCounts, stream));
+    // CUDA_TRY(countBuffer.to_vector(currentDetCounts, stream));
+    CUDA_TRY(countBuffer.to_vector(countBufferHost, stream));
 
-    CUDA_TRY(trackCount.to_vector(currentTrackCounts, stream));
+    // CUDA_TRY(trackCount.to_vector(currentTrackCounts, stream));
+    CUDA_TRY(trackCount.to_vector(trackCountHost, stream));
 
     // Clamp count to stride (capacity)
-    int currentDetCount = std::min(currentDetCounts[batchIndex], stride);
-    int currentTrackCount = std::min(currentTrackCounts[0], maxTracks);
+    int currentDetCount = std::min(countBufferHost[batchIndex], stride);
+    int currentTrackCount = std::min(trackCountHost[0], maxTracks);
 
     // Calculate slice pointer
     DetectionRaw* batchDets = detections.data() + (batchIndex * stride);
@@ -591,8 +616,18 @@ CudaError TrackBatch(int batchIndex,
     // Ghosts
     if (currentTrackCount > 0) {
         int validCount = std::min(currentTrackCount, TRACKER_MAX_TRACKS);
-        KernelGrid gridGhost(validCount, 1024);
-        GhostAndCleanupKernel<<<gridGhost.gsize(), gridGhost.bsize(), 0, stream>>>(
+        // Round up to the nearest warp (32 threads)
+        int threadsPerBlock = ((validCount + 31) / 32) * 32;
+        // Clamp between 32 (1 warp) and 1024 (max block size)
+        threadsPerBlock = std::max(32, std::min(1024, threadsPerBlock));
+        KernelGrid gridGhost(validCount, threadsPerBlock);
+        // Define how the shared memory scales with the block size.
+        // We need 3 floats per warp (threads >> 5).
+        auto shmem_calc_gac = [](int threads) {
+            return (threads >> 5) * sizeof(float) * 3;
+        };
+        GhostAndCleanupKernel<<<gridGhost.gsize(), gridGhost.bsize(),
+                                shmem_calc_gac(gridGhost.bsize().x), stream>>>(
             tracks.data(), trackCount.data(), batchDets, countBuffer.data() + batchIndex, stride,
             (float)batchIndex, activeClasses, imageWidth, imageHeight
         );
@@ -602,8 +637,31 @@ CudaError TrackBatch(int batchIndex,
     return CudaError();
 }
 
+// struct IsAliveTrack {
+//     __host__ __device__
+//         bool operator()(const TrackState& t) const { return t.age != -999; }
+// };
+
+__global__ void CompactTracksKernel(const TrackState* __restrict__ src,
+                                    TrackState* __restrict__ dst,
+                                    int* __restrict__ newCount,
+                                    int currentCount) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= currentCount) return;
+
+    // Read the track into registers
+    TrackState t = src[idx];
+
+    // If it's alive, claim a slot in the destination buffer and write it
+    if (t.age != -999) {
+        int slot = atomicAdd(newCount, 1);
+        dst[slot] = t;
+    }
+}
+
 // Tracks compaction implementation
 CudaError CompactTracks(TypedBlock<TrackState> &tracksBuffer,
+                        TypedBlock<TrackState>& tempTracksBuffer,
                         Block<int> &countBuffer,
                         int maxTracks,
                         cudaStream_t stream) {
@@ -619,22 +677,18 @@ CudaError CompactTracks(TypedBlock<TrackState> &tracksBuffer,
         return CudaError();
     }
 
-    // Cast byte buffer to struct pointer
-    TrackState* ptr = tracksBuffer.data();
+    // Reset the count buffer to 0 so the kernel can use it as an atomic counter
+    CUDA_TRY(countBuffer.fill(0, stream));
 
-    // Partition: Move live tracks to front, dead to back
-    thrust::device_ptr<TrackState> t_ptr(ptr);
-
-    auto new_end = thrust::remove_if(thrust::cuda::par.on(stream), t_ptr, t_ptr + currentCount, IsDeadTrack());
+    // Launch our custom, zero-workspace compaction kernel
+    KernelGrid grid(currentCount);
+    CompactTracksKernel<<<grid.gsize(), grid.bsize(), 0, stream>>>(
+        tracksBuffer.data(), tempTracksBuffer.data(), countBuffer.data(), currentCount
+        );
     CUDA_CHECK_KERNEL(stream);
 
-    // Calculate new count
-    int newCount = (int)(new_end - t_ptr);
-
-    // Update global count on device
-    if (newCount != currentCount) {
-        CUDA_TRY(countBuffer.fill(newCount, stream));
-    }
+    // O(1) Pointer Swap! (Zero D2D memory copy)
+    tracksBuffer.raw().swap(tempTracksBuffer.raw());
 
     return CudaError();
 }

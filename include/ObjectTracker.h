@@ -55,10 +55,12 @@ private:
     CudaError Init(int maxTracks, int numClasses, cudaStream_t stream);
 
     TypedBlock<TrackState> tracks_;
-//    Block<uint8_t> tracks_;
+    TypedBlock<TrackState> tempTracks_;
     Block<int> trackCount_;
+    std::vector<int> trackCountHost_;
     Block<int> nextTrackId_;
-    Block<int> detectionMatches_; 
+    Block<int> detectionMatches_;
+    std::vector<int> countBufferHost_;
 
     int maxTracks_ = 0;
     int numClasses_ = 0;

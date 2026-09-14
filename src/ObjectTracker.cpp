@@ -12,15 +12,19 @@ CudaError ObjectTracker::Init(int maxTracks, int numClasses, cudaStream_t stream
     maxTracks_ = (maxTracks < TRACKER_MAX_TRACKS) ? TRACKER_MAX_TRACKS : maxTracks;
 
     CUDA_TRY(tracks_.resize(maxTracks_, stream));
+    CUDA_TRY(tempTracks_.resize(maxTracks_, stream));
 
     CUDA_TRY(trackCount_.resize(1, stream));
     CUDA_TRY(trackCount_.fill(0, stream));
+    trackCountHost_ = std::vector<int>{0};
 
     CUDA_TRY(nextTrackId_.assign({1}, stream));
 
     // Buffer for matches needs to fit largest possible detections in a batch
-    size_t matchesSize = BatchDetections::MAX_DETECTIONS_PER_FRAME; // * sizeof(int);
+    size_t matchesSize = BatchDetections::MAX_DETECTIONS_PER_FRAME;
     CUDA_TRY(detectionMatches_.resize(matchesSize, stream));
+
+    countBufferHost_ = std::vector<int>(BatchDetections::MAX_DETECTIONS_PER_FRAME, 0);
 
     return CudaError();
 }
@@ -36,8 +40,10 @@ CudaError ObjectTracker::ProcessBatch(int batchIndex,
     CUDA_TRY(TrackBatch(batchIndex,
                         detections,
                         countBuffer,
+                        countBufferHost_,
                         tracks_,
                         trackCount_,
+                        trackCountHost_,
                         nextTrackId_,
                         detectionMatches_,
                         maxDetectionsStride,
@@ -52,7 +58,7 @@ CudaError ObjectTracker::ProcessBatch(int batchIndex,
 }
 
 CudaError ObjectTracker::Compact(cudaStream_t stream) {
-    return CompactTracks(tracks_, trackCount_, maxTracks_, stream);
+    return CompactTracks(tracks_, tempTracks_, trackCount_, maxTracks_, stream);
 }
 
 CudaError ObjectTracker::Annotate(Block<float>& imageBatch,

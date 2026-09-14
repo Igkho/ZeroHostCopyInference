@@ -97,6 +97,8 @@ TEST_F(DetectorKernelsTest, RunNMS_SuppressesOverlap) {
     BoundaryTypedBlock<DetectionRaw> d_final;
     BoundaryBlock<int> d_finalCount;
     Block<uint8_t> d_mask;
+    Block<uint8_t> d_workspace;
+    std::vector<int> d_candCountHost(1, 0);
 
     ASSERT_CUDA_SUCCESS(d_final.resize(10));
     ASSERT_CUDA_SUCCESS(d_finalCount.resize(1));
@@ -104,9 +106,11 @@ TEST_F(DetectorKernelsTest, RunNMS_SuppressesOverlap) {
     ASSERT_CUDA_SUCCESS(RunNMS(
         d_candidates,
         d_candCount,
+        d_candCountHost,
         d_final,
         d_finalCount,
         d_mask,
+        d_workspace,
         0.45f,
         10,
         1,

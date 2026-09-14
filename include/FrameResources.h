@@ -11,6 +11,9 @@ struct FrameResources {
     Block<float> rawOutput;
     TypedBlock<DetectionRaw> candidates;
     BoundaryBlock<int> candidateCount;
+    std::vector<int> candidateCountHost;
+    // Explicit Buffer for Zero-Allocation CUB Sorting ---
+    Block<uint8_t> sortWorkspace;
 
     Block<uint8_t> nmsMask;
     
@@ -27,7 +30,8 @@ struct FrameResources {
         CUDA_TRY(rawOutput.resize(width * height, stream));
         CUDA_TRY(candidates.resize(1000, stream));
         CUDA_TRY(candidateCount.resize(1, stream));
-        
+        CUDA_TRY(sortWorkspace.resize(30000, stream));
+
         // Init nested items
         CUDA_TRY(nmsMask.resize(1, stream));
 

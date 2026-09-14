@@ -59,8 +59,10 @@ struct TrackState {
 CudaError TrackBatch(int batchIndex,
                      BoundaryTypedBlock<DetectionRaw>& detections,
                      BoundaryBlock<int>& countBuffer,
+                     std::vector<int> &countBufferHost,
                      TypedBlock<TrackState>& tracks,
                      Block<int>& trackCount,
+                     std::vector<int> &trackCountHost,
                      Block<int>& nextTrackId,
                      Block<int>& detectionMatches,
                      int stride,
@@ -72,6 +74,7 @@ CudaError TrackBatch(int batchIndex,
                      cudaStream_t stream);
 
 CudaError CompactTracks(TypedBlock<TrackState>& tracksBuffer,
+                        TypedBlock<TrackState> &tempTracksBuffer,
                         Block<int>& countBuffer,
                         int maxTracks,
                         cudaStream_t stream);
