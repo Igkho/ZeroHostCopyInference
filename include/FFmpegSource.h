@@ -2,6 +2,7 @@
 #include "Interfaces.h"
 #include "helpers.h"
 #include "Block.h"
+#include "BatchData.h"
 #include <string>
 #include <memory>
 #include <type_traits>
@@ -58,6 +59,13 @@ private:
 
     bool finished_ = false;
     bool flushing_ = false;
+
+    // Double buffering structures for batched processing
+    Block<uint8_t> device_nv12_y_[2];
+    Block<uint8_t> device_nv12_uv_[2];
+    std::unique_ptr<CudaEvent> dma_complete_event_[2];
+    std::unique_ptr<CudaEvent> nvdec_done_event_;
+    int active_buffer_ = 0;
 };
 
 }

@@ -182,16 +182,70 @@ __global__ void NV12ToRGBPlanarKernel(
     imgPtr[2 * planePixels + dst_y * dstWidth + dst_x] = b;
 }
 
+// Batched Kernel Implementation extracting pointers by Z-dimension index
+__global__ void BatchedNV12ToRGBPlanarKernel(const uint8_t* __restrict__ srcY_base,
+                                             const uint8_t* __restrict__ srcUV_base,
+                                             int srcPitch,
+                                             float* __restrict__ dstBase,
+                                             int srcWidth, int srcHeight,
+                                             int dstWidth, int dstHeight,
+                                             int batchSize)
+{
+    int dst_x = blockIdx.x * blockDim.x + threadIdx.x;
+    int dst_y = blockIdx.y * blockDim.y + threadIdx.y;
+    int batch_idx = blockIdx.z;
+
+    if (dst_x >= dstWidth || dst_y >= dstHeight || batch_idx >= batchSize) return;
+
+    // Calculate offsets
+    size_t y_offset = batch_idx * srcPitch * srcHeight;
+    size_t uv_offset = batch_idx * srcPitch * (srcHeight / 2);
+
+    const uint8_t* srcY = srcY_base + y_offset;
+    const uint8_t* srcUV = srcUV_base + uv_offset;
+
+    float scale_x = (float)srcWidth / (float)dstWidth;
+    float scale_y = (float)srcHeight / (float)dstHeight;
+
+    float src_fx = (dst_x + 0.5f) * scale_x - 0.5f;
+    float src_fy = (dst_y + 0.5f) * scale_y - 0.5f;
+
+    src_fx = fmaxf(0.0f, fminf(src_fx, (float)srcWidth - 1.001f));
+    src_fy = fmaxf(0.0f, fminf(src_fy, (float)srcHeight - 1.001f));
+
+    float Y = interpolate_pixel_norm(srcY, srcPitch, srcWidth, srcHeight, src_fx, src_fy);
+
+    float uv_fx = src_fx * 0.5f;
+    float uv_fy = src_fy * 0.5f;
+    int w_chroma = srcWidth / 2;
+    int h_chroma = srcHeight / 2;
+    uv_fx = fmaxf(0.0f, fminf(uv_fx, (float)w_chroma - 1.001f));
+    uv_fy = fmaxf(0.0f, fminf(uv_fy, (float)h_chroma - 1.001f));
+
+    float U, V;
+    interpolate_uv_norm(srcUV, srcPitch, w_chroma, h_chroma, uv_fx, uv_fy, U, V);
+
+    float r, g, b;
+    YUVToRGB_Normalized(Y, U, V, r, g, b);
+
+    int planePixels = dstWidth * dstHeight;
+    float* imgPtr = dstBase + (batch_idx * planePixels * 3);
+    imgPtr[0 * planePixels + dst_y * dstWidth + dst_x] = r;
+    imgPtr[1 * planePixels + dst_y * dstWidth + dst_x] = g;
+    imgPtr[2 * planePixels + dst_y * dstWidth + dst_x] = b;
 }
 
-CudaError NV12ToRGBPlanar(
-    const uint8_t* srcY, const uint8_t* srcUV, int srcPitch,
-    float* dstBatch,
-    unsigned int batchIndex,
-    unsigned int srcW, unsigned int srcH,
-    unsigned int dstW, unsigned int dstH,
-    bool use_texture_objects,
-    cudaStream_t stream)
+}
+
+CudaError NV12ToRGBPlanar(const uint8_t *srcY,
+                          const uint8_t *srcUV,
+                          int srcPitch,
+                          float* dstBatch,
+                          unsigned int batchIndex,
+                          unsigned int srcW, unsigned int srcH,
+                          unsigned int dstW, unsigned int dstH,
+                          bool use_texture_objects,
+                          cudaStream_t stream)
 {
     if (srcY == nullptr || srcUV == nullptr || srcPitch < 0 ||
         dstBatch == nullptr || // batchIndex < 0 ||
@@ -257,6 +311,33 @@ CudaError NV12ToRGBPlanar(
     }
 
     return CudaError(); //CudaError(ERROR_SOURCE, cudaGetLastError());
+}
+
+// Host wrapper for the batched NV12 kernel launch
+CudaError BatchedNV12ToRGBPlanar(const uint8_t* srcY_base,
+                                 const uint8_t* srcUV_base,
+                                 int srcPitch,
+                                 float* dstBatch,
+                                 unsigned int batchSize,
+                                 unsigned int srcW, unsigned int srcH,
+                                 unsigned int dstW, unsigned int dstH,
+                                 cudaStream_t stream)
+{
+    if (srcY_base == nullptr || srcUV_base == nullptr || srcPitch < 0 ||
+        dstBatch == nullptr || srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0 || batchSize == 0) {
+        return CudaError(ERROR_SOURCE, "BatchedNV12ToRGBPlanar invalid input");
+    }
+
+    KernelGrid grid({dstW, dstH, batchSize}, {16, 16, 1});
+
+    BatchedNV12ToRGBPlanarKernel<<<grid.gsize(), grid.bsize(), 0, stream>>>(
+        srcY_base, srcUV_base, srcPitch,
+        dstBatch,
+        srcW, srcH, dstW, dstH, batchSize
+        );
+    CUDA_CHECK_KERNEL(stream);
+
+    return CudaError();
 }
 
 namespace {

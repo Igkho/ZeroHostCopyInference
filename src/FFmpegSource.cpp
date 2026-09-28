@@ -28,6 +28,7 @@ void FFmpegSource::Cleanup() {
     if (gpuFrame_) {
         av_frame_free(&gpuFrame_);
     }
+
     if (pkt_) {
         av_packet_free(&pkt_);
     }
@@ -95,12 +96,35 @@ CudaError FFmpegSource::Init() {
 
     decCtx_->hw_device_ctx = av_buffer_ref(hwDeviceCtx_);
 
+    // Increase internal AV codec buffer to 32 surface NVDEC limit
+    decCtx_->extra_hw_frames = 21;
+
     if (avcodec_open2(decCtx_, decoder, nullptr) < 0) {
         return CudaError(ERROR_SOURCE, "Failed to open codec");
     }
 
     pkt_ = av_packet_alloc();
     gpuFrame_ = av_frame_alloc();
+
+    // Extract frame dimensions immediately after codec is opened
+    width_ = decCtx_->width;
+    height_ = decCtx_->height;
+
+    // Add 256-byte alignment margin to guarantee buffer can hold hardware-pitched surfaces
+    size_t max_pitch = ((width_ + 255) / 256) * 256 + 256;
+    size_t y_plane_size = max_pitch * height_;
+    size_t uv_plane_size = max_pitch * (height_ / 2);
+
+    // Pre-allocate structural tracking arrays and sync events for batched logic
+    for (int b = 0; b < 2; ++b) {
+        CUDA_TRY(device_nv12_y_[b].reserve(BatchData::MAX_BATCH_SIZE * y_plane_size, *cuda_stream_));
+        CUDA_TRY(device_nv12_uv_[b].reserve(BatchData::MAX_BATCH_SIZE * uv_plane_size, *cuda_stream_));
+
+        CUDA_TRY(CudaEvent::Create(dma_complete_event_[b], cudaEventDisableTiming));
+        // Immediately record so the initial iteration doesn't deadlock
+        CUDA_TRY(cudaEventRecord(*dma_complete_event_[b], *cuda_stream_));
+    }
+    CUDA_TRY(CudaEvent::Create(nvdec_done_event_, cudaEventDisableTiming));
 
     width_ = decCtx_->width;
     height_ = decCtx_->height;
@@ -124,50 +148,80 @@ CudaError FFmpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, bool
     outBatch.sourceIdentifiers.clear();
 
     size_t totalFloats = (outW * outH * 3) * batchSize;
-
     CUDA_TRY(outBatch.deviceData.resize(totalFloats, *cuda_stream_));
 
+    int buf_idx = active_buffer_;
+    // Safely sync the CPU here to guarantee the custom kernel has finished
+    // reading from this specific ping-pong buffer.
+//    CUDA_TRY(cudaEventSynchronize(*dma_complete_event_[buf_idx]));
+
+    // GPU-level sync replaces CPU-level sync.
+    // Instructs NVDEC to wait for TRT before copying over this memory buffer,
+    // but the CPU thread keeps executing instantly.
+    CUDA_TRY(cudaStreamWaitEvent(0, *dma_complete_event_[buf_idx], 0));
+
     int framesCollected = 0;
+    int actualW = 0;
+    int actualH = 0;
+    int framePitch = 0; // Capture pitch for the kernel
 
     // --- ROBUST LOOP: DRAIN FIRST, THEN READ ---
     while (framesCollected < batchSize) {
 
-        // 1. Try to receive pending frames (Drain Decoder)
+        // Try to receive pending frames (Drain Decoder)
         int ret = avcodec_receive_frame(decCtx_, gpuFrame_);
 
         if (ret == 0) {
+
             // Got Frame
             if (gpuFrame_->format == AV_PIX_FMT_CUDA) {
-                int actualW = gpuFrame_->width;
-                int actualH = gpuFrame_->height;
+                actualW = gpuFrame_->width;
+                actualH = gpuFrame_->height;
 
-                float* batchBasePtr = outBatch.deviceData.data();
+                framePitch = gpuFrame_->linesize[0];
 
-                CUDA_TRY(cudaStreamSynchronize(0));
+                // Determine strict 1D block boundaries
+                size_t y_plane_size = framePitch * actualH;
+                size_t uv_plane_size = framePitch * (actualH / 2);
 
-                CUDA_TRY(NV12ToRGBPlanar(gpuFrame_->data[0],
-                                         gpuFrame_->data[1],
-                                         gpuFrame_->linesize[0],
-                                         batchBasePtr,
-                                         framesCollected,
-                                         actualW, actualH,
-                                         outW, outH,
-                                         false,
-                                         *cuda_stream_
-                                         ));
+                // Dynamically expand capacity if batchSize exceeds pre-allocated MAX_BATCH_SIZE
+                if (framesCollected == 0) {
+                    size_t needed_y = batchSize * y_plane_size;
+                    size_t needed_uv = batchSize * uv_plane_size;
+                    if (device_nv12_y_[buf_idx].capacity() < needed_y) {
+                        CUDA_TRY(device_nv12_y_[buf_idx].reserve(needed_y, *cuda_stream_));
+                    }
+                    if (device_nv12_uv_[buf_idx].capacity() < needed_uv) {
+                        CUDA_TRY(device_nv12_uv_[buf_idx].reserve(needed_uv, *cuda_stream_));
+                    }
+                }
 
-                CUDA_TRY(cudaStreamSynchronize(*cuda_stream_));
+                // ultra-fast raw block 1D memory copies
+                CUDA_TRY(cudaMemcpyAsync(
+                    device_nv12_y_[buf_idx].data() + (framesCollected * y_plane_size),
+                    gpuFrame_->data[0],
+                    y_plane_size,
+                    cudaMemcpyDeviceToDevice, 0));
+
+                CUDA_TRY(cudaMemcpyAsync(
+                    device_nv12_uv_[buf_idx].data() + (framesCollected * uv_plane_size),
+                    gpuFrame_->data[1],
+                    uv_plane_size,
+                    cudaMemcpyDeviceToDevice, 0));
+
+                // Release HW frame immediately. Protects the tiny 12-surface NVDEC pool.
+                av_frame_unref(gpuFrame_);
 
                 outBatch.sourceIdentifiers.push_back(std::to_string(frameCounter_++));
                 framesCollected++;
             } else {
+
                 // FATAL: The decoder fell back to software!
                 std::cerr << "[Error] Frame " << frameCounter_
                           << " is format " << gpuFrame_->format
                           << " (Software). Expected AV_PIX_FMT_CUDA." << std::endl;
                 return CudaError(ERROR_SOURCE, "Hardware decoding failed/fallback occurred.");
             }
-            av_frame_unref(gpuFrame_);
             continue; // Keep draining
         }
         else if (ret == AVERROR_EOF) {
@@ -181,7 +235,7 @@ CudaError FFmpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, bool
             break;
         }
 
-        // 2. Decoder Empty (EAGAIN) -> Read Packet
+        // Decoder Empty (EAGAIN) -> Read Packet
         if (flushing_) {
             finished_ = true;
             flushing_ = false;
@@ -207,12 +261,29 @@ CudaError FFmpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, bool
     }
 
     if (framesCollected > 0) {
+        // Stream Bridge: Tell custom stream to wait for Stream 0's D2D copies to finish.
+        CUDA_TRY(cudaEventRecord(*nvdec_done_event_, 0));
+        CUDA_TRY(cudaStreamWaitEvent(*cuda_stream_, *nvdec_done_event_, 0));
+
+        // Pass the harvested hardware pitch to the batched kernel reading from the buffers.
+        CUDA_TRY(BatchedNV12ToRGBPlanar(
+            device_nv12_y_[buf_idx].data(),
+            device_nv12_uv_[buf_idx].data(),
+            framePitch,
+            outBatch.deviceData.data(),
+            framesCollected,
+            actualW, actualH,
+            outW, outH,
+            *cuda_stream_
+            ));
+
         // Zero-fill the padding frames at EOF so the CNN doesn't process stale recycled memory
         if (framesCollected < batchSize) {
             size_t frameFloats = outW * outH * 3;
             size_t offset = framesCollected * frameFloats;
             CUDA_TRY(outBatch.deviceData.fill_back(offset, 0.0f, *cuda_stream_));
         }
+
         if (!outBatch.readyEvent) {
             CUDA_TRY(CudaEvent::Create(outBatch.readyEvent));
         }
@@ -231,7 +302,10 @@ CudaError FFmpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, bool
             }
         }
     }
+    // Record that custom stream is finished with the hardware frames
+    CUDA_TRY(cudaEventRecord(*dma_complete_event_[buf_idx], *cuda_stream_));
 
+    active_buffer_ = (active_buffer_ + 1) & 0x01;
     outBatch.batchSize = framesCollected;
     process = framesCollected > 0;
     return CudaError();

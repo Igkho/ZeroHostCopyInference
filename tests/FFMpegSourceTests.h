@@ -291,4 +291,60 @@ TEST_F(FFmpegSourceKernelTest, GlobalMemoryImplementation) {
     RunKernelTest(false);
 }
 
+// Coverage for BatchedNV12ToRGBPlanar
+TEST_F(FFmpegSourceKernelTest, BatchedImplementation) {
+    int srcW = 2;
+    int srcH = 2;
+    int batchSize = 2;
+
+    size_t texAlignment = 0;
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, 0);
+    texAlignment = prop.texturePitchAlignment;
+    size_t srcPitch = (srcW < texAlignment) ? texAlignment : (srcW + texAlignment - 1) / texAlignment * texAlignment;
+
+    // Host Data (2x2) x 2 frames.
+    std::vector<uint8_t> h_Y = { 16, 235, 128, 128,
+                                235, 16, 128, 128 };
+    std::vector<uint8_t> h_UV = { 128, 128,
+                                 128, 128 };
+
+    Block<uint8_t> d_Y;
+    Block<uint8_t> d_UV;
+    Block<float> d_Dst;
+
+    ASSERT_CUDA_SUCCESS(d_Y.resize(batchSize * srcPitch * srcH));
+    ASSERT_CUDA_SUCCESS(d_UV.resize(batchSize * srcPitch * (srcH / 2)));
+    ASSERT_CUDA_SUCCESS(d_Dst.resize(batchSize * srcW * srcH * 3));
+
+    // Upload pitched test data
+    for (int b = 0; b < batchSize; ++b) {
+        ASSERT_EQ(cudaMemcpy2D(d_Y.data() + b * srcPitch * srcH, srcPitch,
+                               h_Y.data() + b * srcW * srcH, srcW, srcW, srcH,
+                               cudaMemcpyHostToDevice), cudaSuccess);
+        ASSERT_EQ(cudaMemcpy2D(d_UV.data() + b * srcPitch * (srcH / 2), srcPitch,
+                               h_UV.data() + b * srcW * (srcH / 2), srcW, srcW, srcH / 2,
+                               cudaMemcpyHostToDevice), cudaSuccess);
+    }
+
+    CudaError err = BatchedNV12ToRGBPlanar(d_Y.data(), d_UV.data(), (int)srcPitch,
+                                           d_Dst.data(), batchSize,
+                                           srcW, srcH, srcW, srcH, 0);
+    ASSERT_CUDA_SUCCESS(err);
+    cudaDeviceSynchronize();
+
+    std::vector<float> h_Dst;
+    ASSERT_CUDA_SUCCESS(d_Dst.to_vector(h_Dst));
+
+    float tolerance = 0.05f;
+
+    // Verify Frame 0
+    EXPECT_NEAR(h_Dst[0], 0.0f, tolerance) << "Frame 0: Pixel 0 Red mismatch";
+    EXPECT_GT(h_Dst[1], 0.8f) << "Frame 0: Pixel 1 Red mismatch";
+
+    // Verify Frame 1 (Offset by srcW * srcH * 3 = 12 floats)
+    EXPECT_GT(h_Dst[12], 0.8f) << "Frame 1: Pixel 0 Red mismatch";
+    EXPECT_NEAR(h_Dst[13], 0.0f, tolerance) << "Frame 1: Pixel 1 Red mismatch";
+}
+
 } // namespace cropandweed

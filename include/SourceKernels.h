@@ -5,6 +5,15 @@
 
 namespace cropandweed {
 
+CudaError BatchedNV12ToRGBPlanar(const uint8_t *srcY_base,
+                                 const uint8_t *srcUV_base,
+                                 int srcPitch,
+                                 float* dstBatch,
+                                 unsigned int batchSize,
+                                 unsigned int srcW, unsigned int srcH,
+                                 unsigned int dstW, unsigned int dstH,
+                                 cudaStream_t stream = 0);
+
 CudaError NV12ToRGBPlanar(const uint8_t* srcY,
                           const uint8_t* srcUV,
                           int srcPitch,
