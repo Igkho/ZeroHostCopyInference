@@ -101,7 +101,8 @@ protected:
 
 TEST_F(NVJpegSourceTest, InitFailsOnInvalidDirectory) {
     std::unique_ptr<ISource> source;
-    CudaError err = NVJpegSource::Create(source, "/path/to/nowhere/that/does/not/exist", 224, 224);
+    CudaError err = NVJpegSource::Create(source, "/path/to/nowhere/that/does/not/exist",
+                                         224, 224, 2);
 
     EXPECT_TRUE(CudaError::IsFailure(err));
     EXPECT_NE(err.Text().find("Invalid folder path"), std::string::npos);
@@ -109,7 +110,7 @@ TEST_F(NVJpegSourceTest, InitFailsOnInvalidDirectory) {
 
 TEST_F(NVJpegSourceTest, InitSucceedsOnEmptyDirectory) {
     std::unique_ptr<ISource> source;
-    ASSERT_CUDA_SUCCESS(NVJpegSource::Create(source, test_dir_.string(), 224, 224));
+    ASSERT_CUDA_SUCCESS(NVJpegSource::Create(source, test_dir_.string(), 224, 224, 2));
     ASSERT_NE(source, nullptr);
 
     BatchData batch;
@@ -129,7 +130,8 @@ TEST_F(NVJpegSourceTest, DecodesSingleBatchExactly) {
     CreateDummyJpegs(batchSize);
 
     std::unique_ptr<ISource> source;
-    ASSERT_CUDA_SUCCESS(NVJpegSource::Create(source, test_dir_.string(), targetW, targetH));
+    ASSERT_CUDA_SUCCESS(NVJpegSource::Create(source, test_dir_.string(),
+                                             targetW, targetH, batchSize));
 
     BatchData batch;
     bool process = false;
@@ -150,19 +152,20 @@ TEST_F(NVJpegSourceTest, DecodesSingleBatchExactly) {
 }
 
 TEST_F(NVJpegSourceTest, DecodesPartialBatchAtEOF) {
+    int batchSize = 8;
     CreateDummyJpegs(3);
 
     std::unique_ptr<ISource> source;
-    ASSERT_CUDA_SUCCESS(NVJpegSource::Create(source, test_dir_.string(), 64, 64));
+    ASSERT_CUDA_SUCCESS(NVJpegSource::Create(source, test_dir_.string(), 64, 64, batchSize));
 
     BatchData batch;
     bool process = false;
 
-    ASSERT_CUDA_SUCCESS(source->GetNextBatch(batch, 8, process));
+    ASSERT_CUDA_SUCCESS(source->GetNextBatch(batch, batchSize, process));
     EXPECT_TRUE(process);
     EXPECT_EQ(batch.batchSize, 3);
 
-    ASSERT_CUDA_SUCCESS(source->GetNextBatch(batch, 8, process));
+    ASSERT_CUDA_SUCCESS(source->GetNextBatch(batch, batchSize, process));
     EXPECT_FALSE(process);
 }
 
@@ -176,15 +179,16 @@ TEST_F(NVJpegSourceTest, CorruptImageIsSkippedSafely) {
     CreateValidJpeg(0);
     CreateCorruptJpeg(1);
     CreateValidJpeg(2);
+    int batchSize = 4;
 
     std::unique_ptr<ISource> source;
-    ASSERT_CUDA_SUCCESS(NVJpegSource::Create(source, test_dir_.string(), 128, 128));
+    ASSERT_CUDA_SUCCESS(NVJpegSource::Create(source, test_dir_.string(), 128, 128, batchSize));
 
     BatchData batch;
     bool process = false;
 
     // Request 4. Source sees 3 files. It parses them, finds 1 is bad.
-    ASSERT_CUDA_SUCCESS(source->GetNextBatch(batch, 4, process));
+    ASSERT_CUDA_SUCCESS(source->GetNextBatch(batch, batchSize, process));
 
     EXPECT_TRUE(process);
     EXPECT_EQ(batch.batchSize, 2) << "Must discard the corrupt image and yield the 2 valid ones";
@@ -203,14 +207,15 @@ TEST_F(NVJpegSourceTest, EntireCorruptBatchAdvancesToNextValidBatch) {
     CreateCorruptJpeg(0);
     CreateCorruptJpeg(1);
     CreateValidJpeg(2);
+    int batchSize = 2;
 
     std::unique_ptr<ISource> source;
-    ASSERT_CUDA_SUCCESS(NVJpegSource::Create(source, test_dir_.string(), 64, 64));
+    ASSERT_CUDA_SUCCESS(NVJpegSource::Create(source, test_dir_.string(), 64, 64, batchSize));
 
     BatchData batch;
     bool process = false;
 
-    ASSERT_CUDA_SUCCESS(source->GetNextBatch(batch, 2, process));
+    ASSERT_CUDA_SUCCESS(source->GetNextBatch(batch, batchSize, process));
 
     EXPECT_TRUE(process) << "Must recursively fetch the next chunk if the current chunk completely fails";
     EXPECT_EQ(batch.batchSize, 1) << "Must return the 1 valid image from Chunk 2";
@@ -222,14 +227,15 @@ TEST_F(NVJpegSourceTest, EntireCorruptBatchAdvancesToNextValidBatch) {
 TEST_F(NVJpegSourceTest, CorruptImagesAtEOFYieldsNoProcess) {
     CreateCorruptJpeg(0);
     CreateCorruptJpeg(1);
+    int batchSize = 4;
 
     std::unique_ptr<ISource> source;
-    ASSERT_CUDA_SUCCESS(NVJpegSource::Create(source, test_dir_.string(), 64, 64));
+    ASSERT_CUDA_SUCCESS(NVJpegSource::Create(source, test_dir_.string(), 64, 64, batchSize));
 
     BatchData batch;
     bool process = true; // Initialize to true to verify it correctly flips
 
-    ASSERT_CUDA_SUCCESS(source->GetNextBatch(batch, 4, process));
+    ASSERT_CUDA_SUCCESS(source->GetNextBatch(batch, batchSize, process));
 
     EXPECT_FALSE(process) << "Pipeline must cleanly signal EOF if remaining images are corrupt";
     EXPECT_EQ(batch.batchSize, 0);
@@ -243,7 +249,7 @@ TEST_F(NVJpegSourceTest, ExercisesDoubleBufferingWrapAround) {
     CreateDummyJpegs(6); // 3 full batches: (0,1), (2,3), (4,5)
 
     std::unique_ptr<ISource> source;
-    ASSERT_CUDA_SUCCESS(NVJpegSource::Create(source, test_dir_.string(), 128, 128));
+    ASSERT_CUDA_SUCCESS(NVJpegSource::Create(source, test_dir_.string(), 128, 128, batchSize));
 
     BatchData batch;
     bool process = true;
@@ -276,7 +282,8 @@ TEST_F(NVJpegSourceTest, PartialBatchMaintainsStrictEngineCapacityAndZeroPads) {
     int reqBatchSize = 4;
 
     std::unique_ptr<ISource> source;
-    ASSERT_CUDA_SUCCESS(NVJpegSource::Create(source, test_dir_.string(), targetW, targetH));
+    ASSERT_CUDA_SUCCESS(NVJpegSource::Create(source, test_dir_.string(),
+                                             targetW, targetH, reqBatchSize));
 
     BatchData batch;
     bool process = false;

@@ -211,45 +211,53 @@ TEST_F(NVJpegSinkTest, VerifiesDoubleBufferedDeferral) {
     std::unique_ptr<ISink> sink;
     ASSERT_CUDA_SUCCESS(NVJpegSink::Create(sink, output_dir_.string(), {w, h, 3, {"", "", ""}}));
 
+    std::shared_ptr<BatchDetections> results;
+    ASSERT_CUDA_SUCCESS(BatchDetections::Create(results, 1));
+    ASSERT_CUDA_SUCCESS(results->counts.fill(0, 0));
+    cudaEventRecord(*results->readyEvent, 0);
+
+    // 1. Send BATCH 1 (Uses Buffer 0)
     std::shared_ptr<BatchData> data1;
     ASSERT_CUDA_SUCCESS(BatchData::Create(data1, 1, 1, w, h));
     ASSERT_CUDA_SUCCESS(data1->deviceData.fill(0, 0));
     data1->sourceIdentifiers = {"batch1_img"};
     cudaEventRecord(*data1->readyEvent, 0);
 
-    std::shared_ptr<BatchDetections> results;
-    ASSERT_CUDA_SUCCESS(BatchDetections::Create(results, 1));
-    ASSERT_CUDA_SUCCESS(results->counts.fill(0, 0));
-    cudaEventRecord(*results->readyEvent, 0);
-
-    // 1. Send first batch
     ASSERT_CUDA_SUCCESS(sink->Save(*data1, *results));
 
     // Verify it is DEFERRED
     fs::path file1 = output_dir_ / "frame_batch1_img.jpg";
     EXPECT_FALSE(fs::exists(file1)) << "Batch 1 was written synchronously instead of being deferred!";
 
-    // 2. Prepare second batch
+    // 2. Prepare BATCH 2 (Uses Buffer 1 - Runs concurrently with Buffer 0!)
     std::shared_ptr<BatchData> data2;
     ASSERT_CUDA_SUCCESS(BatchData::Create(data2, 2, 1, w, h));
     ASSERT_CUDA_SUCCESS(data2->deviceData.fill(0, 0));
     data2->sourceIdentifiers = {"batch2_img"};
     cudaEventRecord(*data2->readyEvent, 0);
 
-    // 3. Send second batch. This must trigger the flush of data1.
     ASSERT_CUDA_SUCCESS(sink->Save(*data2, *results));
 
-    // Verify Batch 1 is now written, but Batch 2 is still deferred
-    EXPECT_TRUE(fs::exists(file1)) << "Batch 2 failed to trigger the N-1 flush for Batch 1.";
+    // 3. Prepare BATCH 3 (Uses Buffer 0)
+    // Because it reuses Buffer 0, it MUST synchronize and flush Batch 1!
+    std::shared_ptr<BatchData> data3;
+    ASSERT_CUDA_SUCCESS(BatchData::Create(data3, 3, 1, w, h));
+    ASSERT_CUDA_SUCCESS(data3->deviceData.fill(0, 0));
+    data3->sourceIdentifiers = {"batch3_img"};
+    cudaEventRecord(*data3->readyEvent, 0);
 
-    fs::path file2 = output_dir_ / "frame_batch2_img.jpg";
-    EXPECT_FALSE(fs::exists(file2)) << "Batch 2 was written synchronously!";
+    ASSERT_CUDA_SUCCESS(sink->Save(*data3, *results));
 
-    // 4. Explicit Close
+    // [UPDATE] We can safely verify Batch 1 here, because Save(Batch 3) strictly blocked until Batch 1 finished
+    EXPECT_TRUE(fs::exists(file1)) << "Batch 3 failed to synchronize the async IO threads for Batch 1.";
+
+    // 4. Explicit Close forces synchronization of the trailing Batch 2 and Batch 3
     ASSERT_CUDA_SUCCESS(sink->Close());
 
-    // Verify Batch 2 is finally written
-    EXPECT_TRUE(fs::exists(file2)) << "Close() failed to flush the final deferred batch.";
+    fs::path file2 = output_dir_ / "frame_batch2_img.jpg";
+    fs::path file3 = output_dir_ / "frame_batch3_img.jpg";
+    EXPECT_TRUE(fs::exists(file2)) << "Close() failed to flush Batch 2.";
+    EXPECT_TRUE(fs::exists(file3)) << "Close() failed to flush Batch 3.";
 }
 
 TEST_F(NVJpegSinkTest, DestructorFallbackSavesUnflushedData) {

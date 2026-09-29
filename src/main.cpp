@@ -157,7 +157,8 @@ int main(int argc, char** argv) {
                                               props.inputHeight, batchSize));
 #else
             std::cout << "[Main] Input is a directory. Initializing NVJpegSource..." << std::endl;
-            CUDA_CALL(NVJpegSource::Create(source, inputPath, props.inputWidth, props.inputHeight));
+            CUDA_CALL(NVJpegSource::Create(source, inputPath, props.inputWidth,
+                                           props.inputHeight, batchSize));
 #endif
         } else if (fs::is_regular_file(inputPath)) {
             // Hardware-aware routing: Prevent Jetson from attempting unsupported NVDEC video decoding

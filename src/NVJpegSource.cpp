@@ -30,7 +30,20 @@ static CudaError CheckNVJpegVersion() {
 }
 
 NVJpegSource::~NVJpegSource() {
-    // 1. Destroy Double-Buffered Arrays
+    // Join outstanding futures safely to avoid zombie threads on termination
+    if (cuda_stream_) {
+        CUDA_CALL_NO_THROW(cudaStreamSynchronize(*cuda_stream_));
+    }
+    for (int b = 0; b < 2; ++b) {
+        for (auto& task : futures_[b]) {
+            if (task.valid()) {
+                try {
+                    task.get();
+                } catch (...) {}
+            }
+        }
+    }
+    // Destroy Double-Buffered Arrays
     for (int b = 0; b < 2; ++b) {
         for (auto& state : decoupled_states_[b]) {
             if (state) CUDA_CALL_NO_THROW(nvjpegJpegStateDestroy(state));
@@ -46,7 +59,7 @@ NVJpegSource::~NVJpegSource() {
         }
     }
 
-    // 2. Destroy Shared Decoupled Components
+    // Destroy Shared Decoupled Components
     if (decode_params_) {
         CUDA_CALL_NO_THROW(nvjpegDecodeParamsDestroy(decode_params_));
     }
@@ -54,14 +67,16 @@ NVJpegSource::~NVJpegSource() {
         CUDA_CALL_NO_THROW(nvjpegDecoderDestroy(jpeg_decoder_));
     }
 
-    // 3. Destroy Base Handle Last
+    // Destroy Base Handle Last
     if (nvjpeg_handle_) {
         CUDA_CALL_NO_THROW(nvjpegDestroy(nvjpeg_handle_));
     }
 }
 
-CudaError NVJpegSource::Create(std::unique_ptr<ISource>& out, std::string folderPath, int width, int height) {
-    auto ptr = std::make_unique<NVJpegSource>(Token{}, std::move(folderPath), width, height);
+CudaError NVJpegSource::Create(std::unique_ptr<ISource>& out, std::string folderPath,
+                               int width, int height, size_t batch_size) {
+    auto ptr = std::make_unique<NVJpegSource>(Token{}, std::move(folderPath),
+                                              width, height, batch_size);
     CUDA_TRY(ptr->Init());
     out = std::move(ptr);
     return CudaError();
@@ -100,209 +115,246 @@ CudaError NVJpegSource::Init() {
 
     size_t max_batch = BatchData::MAX_BATCH_SIZE;
 
-    // Initialize exactly two sets of GPU-boundary buffers
+    // Initialize logical decoders based on limit macro
     for (int b = 0; b < 2; ++b) {
-        decoupled_states_[b].resize(max_batch);
-        jpeg_streams_[b].resize(max_batch);
-        pinned_buffers_[b].resize(max_batch);
-        device_buffers_[b].resize(max_batch);
+        resource_pool_[b].resize(batch_size_);
+        futures_[b].resize(DECODERS_PER_BUFFER);
 
-        for (size_t i = 0; i < max_batch; ++i) {
-            CUDA_TRY(nvjpegDecoderStateCreate(nvjpeg_handle_, jpeg_decoder_, &decoupled_states_[b][i]));
-            CUDA_TRY(nvjpegJpegStreamCreate(nvjpeg_handle_, &jpeg_streams_[b][i]));
-            CUDA_TRY(nvjpegBufferPinnedCreate(nvjpeg_handle_, nullptr, &pinned_buffers_[b][i]));
-            CUDA_TRY(nvjpegBufferDeviceCreate(nvjpeg_handle_, nullptr, &device_buffers_[b][i]));
+        decoupled_states_[b].resize(DECODERS_PER_BUFFER);
+        jpeg_streams_[b].resize(DECODERS_PER_BUFFER);
+        pinned_buffers_[b].resize(DECODERS_PER_BUFFER);
+        device_buffers_[b].resize(DECODERS_PER_BUFFER);
+        decode_streams_[b].resize(DECODERS_PER_BUFFER);
+
+        for (int t = 0; t < DECODERS_PER_BUFFER; ++t) {
+            CUDA_TRY(CudaStream::Create(decode_streams_[b][t], cudaStreamNonBlocking));
+            CUDA_TRY(nvjpegDecoderStateCreate(nvjpeg_handle_, jpeg_decoder_, &decoupled_states_[b][t]));
+            CUDA_TRY(nvjpegJpegStreamCreate(nvjpeg_handle_, &jpeg_streams_[b][t]));
+            CUDA_TRY(nvjpegBufferPinnedCreate(nvjpeg_handle_, nullptr, &pinned_buffers_[b][t]));
+            CUDA_TRY(nvjpegBufferDeviceCreate(nvjpeg_handle_, nullptr, &device_buffers_[b][t]));
         }
 
         CUDA_TRY(CudaEvent::Create(dma_complete_event_[b], cudaEventDisableTiming));
         CUDA_TRY(cudaEventRecord(*dma_complete_event_[b], *cuda_stream_));
+
+        // Fire the background pre-fetching automatically
+        DispatchAsyncBatch(b);
     }
 
     return CudaError();
 }
 
 CudaError NVJpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, bool& process) {
-    if (current_file_idx_ >= file_list_.size()) {
-        process = false;
-        return CudaError();
-    }
-
     int buf_idx = active_buffer_;
 
-    // 1. Sync: Wait for GPU to finish pulling from this specific buffer
-    CUDA_TRY(cudaEventSynchronize(*dma_complete_event_[buf_idx]));
+    // Save the frame count before dispatching the next batch
+    int current_chunk_frames = frames_in_buffer_[buf_idx];
 
-    std::vector<std::string> batch_filenames;
-    int framesCollected = 0;
-        while (framesCollected < batchSize && current_file_idx_ < file_list_.size()) {
-        batch_filenames.push_back(file_list_[current_file_idx_]);
-        current_file_idx_++;
-        framesCollected++;
-    }
-
-    if (framesCollected == 0) {
+    // 1. Check for End of Stream
+    if (current_chunk_frames == 0) {
         process = false;
         return CudaError();
     }
 
-    // 2. Dispatch Parallel Tasks with Local, Ephemeral Memory
-    std::vector<std::future<DecodeResult>> futures;
-    for (int i = 0; i < framesCollected; ++i) {
-        futures.push_back(std::async(std::launch::async,
-                                     [this, i, buf_idx, filepath = batch_filenames[i]]() -> DecodeResult {
-            DecodeResult res;
-
-            std::ifstream file(filepath, std::ios::in | std::ios::binary | std::ios::ate);
-            if (!file) {
-                res.err = CudaError(ERROR_SOURCE, "Can't open the file: " + filepath);
-                return res;
-            }
-
-            size_t file_size = file.tellg();
-            file.seekg(0, std::ios::beg);
-
-            std::vector<uint8_t> local_raw_data(file_size);
-            if (!file.read(reinterpret_cast<char*>(local_raw_data.data()), file_size)) {
-                res.err = CudaError(ERROR_SOURCE, "Can't read the file: " + filepath);
-                return res;
-            }
-
-            // Bind decoupled buffers to state
-            CUDA_TRY_LAMBDA(nvjpegStateAttachDeviceBuffer(decoupled_states_[buf_idx][i],
-                                                          device_buffers_[buf_idx][i]),
-                                                          res);
-            CUDA_TRY_LAMBDA(nvjpegStateAttachPinnedBuffer(decoupled_states_[buf_idx][i],
-                                                          pinned_buffers_[buf_idx][i]), res);
-
-            // Parse Stream from our local vector
-            CUDA_TRY_LAMBDA(nvjpegJpegStreamParse(nvjpeg_handle_,
-                                                  local_raw_data.data(),
-                                                  file_size, 0, 0,
-                                                  jpeg_streams_[buf_idx][i]), res);
-
-            int channels, widths[NVJPEG_MAX_COMPONENT], heights[NVJPEG_MAX_COMPONENT];
-            nvjpegChromaSubsampling_t subsampling;
-
-            CUDA_TRY_LAMBDA(nvjpegGetImageInfo(nvjpeg_handle_, local_raw_data.data(), file_size,
-                                               &channels, &subsampling, widths, heights), res);
-            if (subsampling == NVJPEG_CSS_UNKNOWN) {
-                res.err = CudaError(ERROR_SOURCE, "File with unknown chroma subsampling: " + filepath);
-                return res;
-            }
-
-            res.width = widths[0];
-            res.height = heights[0];
-            res.channels = channels;
-
-            // Execute heavy CPU Phase.
-            // This consumes `local_raw_data` and writes safe DMA-ready data to `pinned_buffers_[buf_idx][i]`
-            CUDA_TRY_LAMBDA(nvjpegDecodeJpegHost(nvjpeg_handle_, jpeg_decoder_,
-                                                 decoupled_states_[buf_idx][i], decode_params_,
-                                                 jpeg_streams_[buf_idx][i]), res);
-
-            res.success = true;
-            return res;
-        }));
+    if (batchSize > batch_size_) {
+        return CudaError(ERROR_SOURCE, "Requested batchSize exceeds pre-allocated pool");
     }
 
-    // 3. Barrier: Wait for all CPU threads to finish and compute offsets
-    std::vector<int> original_widths;
-    std::vector<int> original_heights;
-    std::vector<size_t> raw_offsets;
-    std::vector<int> valid_indices;
-    size_t total_raw_bytes_needed = 0;
+    // 2. Gather Async Threads together
+    std::vector<NVJpegDecodeStatus> valid_statuses;
+    int num_threads = std::min(current_chunk_frames, DECODERS_PER_BUFFER);
 
-    for (int i = 0; i < framesCollected; ++i) {
-        DecodeResult res = futures[i].get();
-        if (!res.success) {
-            // Log the error locally and skip the file
-            std::cerr << "\n[NVJpegSource] Warning: Skipping bad file '" << batch_filenames[i]
-                      << "' due to decoding error:\n" << res.err.Text() << "\n" << std::endl;
-            continue;
+    for (int t = 0; t < num_threads; ++t) {
+        std::vector<NVJpegDecodeStatus> chunk_statuses = futures_[buf_idx][t].get();
+        for (const auto& status : chunk_statuses) {
+            if (status.success) {
+                valid_statuses.push_back(status);
+            } else {
+                std::cerr << "\n[NVJpegSource] Warning: Skipping bad file '"
+                          << status.filename << "': " << status.err.Text() << std::endl;
+            }
         }
-        original_widths.push_back(res.width);
-        original_heights.push_back(res.height);
-        raw_offsets.push_back(total_raw_bytes_needed);
-        valid_indices.push_back(i);
-        total_raw_bytes_needed += res.width * res.height * res.channels;
     }
 
-    int validCount = valid_indices.size();
-
-    // If all frames in this chunk failed, safely release the buffer and fetch the next chunk recursively
+    int validCount = valid_statuses.size();
     if (validCount == 0) {
+        // Free buffer, switch, and recursively fetch the next chunk
         CUDA_TRY(cudaEventRecord(*dma_complete_event_[buf_idx], *cuda_stream_));
         active_buffer_ = (active_buffer_ + 1) & 0x01;
-        frameCounter_ += framesCollected;
+        frameCounter_ += current_chunk_frames;
+        DispatchAsyncBatch(buf_idx);
+        std::cerr << "\n[NVJpegSource] Warning: Skipping fully bad batch." << std::endl;
         return GetNextBatch(outBatch, batchSize, process);
     }
 
-    // 4. Setup GPU Output Layout
+    // 3. Setup GPU Output Layout
     size_t framePixelsTarget = targetW_ * targetH_;
-
-    // Always allocate for the FULL requested batchSize to satisfy strict-batch engines
     CUDA_TRY(outBatch.deviceData.resize(batchSize * framePixelsTarget * 3, *cuda_stream_));
-    CUDA_TRY(device_decode_buffer_.resize(total_raw_bytes_needed, *cuda_stream_));
     outBatch.sourceIdentifiers.clear();
 
-    // 5. Queue Asynchronous GPU Transfers (DMA reads from pinned_buffers_)
+    // 4. Main-Thread Operations (Color Conversion)
     for (int k = 0; k < validCount; ++k) {
-        int i = valid_indices[k]; // Lookup the original index 'i' for the hardware bindings
-        int srcW = original_widths[k];
-        int srcH = original_heights[k];
-        size_t srcPlaneSize = srcW * srcH;
-
-        uint8_t* frameStart = device_decode_buffer_.data() + raw_offsets[k];
-        nvjpegImage_t destImage;
-        destImage.channel[0] = frameStart;
-        destImage.channel[1] = frameStart + srcPlaneSize;
-        destImage.channel[2] = frameStart + (2 * srcPlaneSize);
-        destImage.pitch[0] = srcW;
-        destImage.pitch[1] = srcW;
-        destImage.pitch[2] = srcW;
-
-        CUDA_TRY(nvjpegDecodeJpegTransferToDevice(nvjpeg_handle_, jpeg_decoder_,
-                                                  decoupled_states_[buf_idx][i],
-                                                  jpeg_streams_[buf_idx][i], *cuda_stream_));
-
-        CUDA_TRY(nvjpegDecodeJpegDevice(nvjpeg_handle_, jpeg_decoder_,
-                                        decoupled_states_[buf_idx][i], &destImage, *cuda_stream_));
+        const NVJpegDecodeStatus& status = valid_statuses[k];
+        int i = status.batch_index;
+        auto& res = resource_pool_[buf_idx][i];
 
         float* batch_dst = outBatch.deviceData.data() + (k * framePixelsTarget * 3);
 
-        CUDA_TRY(ResizeAndCastRGBPlanar(destImage.channel[0], destImage.channel[1], destImage.channel[2],
-            srcW, srcH, srcW, batch_dst, targetW_, targetH_, *cuda_stream_));
+        // Convert the decoded RGB planar bytes to normalized floats
+        CUDA_TRY(ResizeAndCastRGBPlanar(
+            res.decoded_pixels.data(),
+            res.decoded_pixels.data() + status.width * status.height,
+            res.decoded_pixels.data() + 2 * status.width * status.height,
+            status.width, status.height, status.width,
+            batch_dst, targetW_, targetH_, *cuda_stream_));
 
         outBatch.sourceIdentifiers.push_back(std::to_string(frameCounter_ + i));
     }
 
-    // Zero-fill the padding frames so the CNN doesn't process garbage/NaNs
+    // 5. Zero-fill padding (if batch is incomplete)
     if (validCount < batchSize) {
         size_t offset = validCount * framePixelsTarget * 3;
         CUDA_TRY(outBatch.deviceData.fill_back(offset, 0.0f, *cuda_stream_));
     }
 
-    // 6. Protect Pinned Buffers
-    // CPU cannot overwrite this set of pinned_buffers_ until this event triggers next cycle
+    // 6. Write the conversion finish event (Releases memory for async threads on next cycle)
     CUDA_TRY(cudaEventRecord(*dma_complete_event_[buf_idx], *cuda_stream_));
 
-    // 7. Signal Pipeline Readiness
     if (!outBatch.readyEvent) {
         CUDA_TRY(CudaEvent::Create(outBatch.readyEvent));
     }
     CUDA_TRY(cudaEventRecord(*outBatch.readyEvent, *cuda_stream_));
 
+    // 7. Fire all async threads for the next cycle for this buffer
+    DispatchAsyncBatch(buf_idx);
+
+    // 8. Switch current buffers set
     outBatch.batchId = frameCounter_ / batchSize;
-    frameCounter_ += framesCollected;
-    outBatch.batchSize = validCount; // Assign the compressed, valid size to the downstream detector
+    frameCounter_ += current_chunk_frames;
+    outBatch.batchSize = validCount;
     outBatch.width = targetW_;
     outBatch.height = targetH_;
     process = true;
-
-    // 8. Swap active buffer index for the next iteration
     active_buffer_ = (active_buffer_ + 1) & 0x01;
 
     return CudaError();
+}
+
+// True multi-threaded pre-fetching and hardware scheduling
+void NVJpegSource::DispatchAsyncBatch(int buf_idx) {
+    frames_in_buffer_[buf_idx] = 0;
+
+    // Gather filenames for this specific batch
+    std::vector<std::string> batch_filenames;
+    while (frames_in_buffer_[buf_idx] < batch_size_ && current_file_idx_ < file_list_.size()) {
+        batch_filenames.push_back(file_list_[current_file_idx_]);
+        current_file_idx_++;
+        frames_in_buffer_[buf_idx]++;
+    }
+
+    if (frames_in_buffer_[buf_idx] == 0) {
+        return; // End of stream
+    }
+
+    int num_threads = std::min(frames_in_buffer_[buf_idx], DECODERS_PER_BUFFER);
+    int frames_per_thread = (frames_in_buffer_[buf_idx] + num_threads - 1) / num_threads; // Ceiling division
+
+    // Fire Async Threads
+    for (int t = 0; t < num_threads; ++t) {
+        futures_[buf_idx][t] = std::async(std::launch::async,
+            [this, t, frames_per_thread, frames_in_buffer = frames_in_buffer_[buf_idx],
+             batch_filenames, buf_idx]() -> std::vector<NVJpegDecodeStatus> {
+
+            std::vector<NVJpegDecodeStatus> thread_statuses;
+            int start_idx = t * frames_per_thread;
+            int end_idx = std::min(start_idx + frames_per_thread, frames_in_buffer);
+
+            cudaStream_t local_stream = *decode_streams_[buf_idx][t];
+
+            // This single thread sequentially reads and decodes its chunk of files
+            for (int i = start_idx; i < end_idx; ++i) {
+
+                NVJpegDecodeStatus frame_status = [&, frame_idx = i]() -> NVJpegDecodeStatus {
+                    NVJpegDecodeStatus status;
+                    status.filename = batch_filenames[frame_idx];
+                    status.batch_index = frame_idx;
+
+                    // Fetch resource targeted for this exact frame (Data Safety)
+                    auto& res = resource_pool_[buf_idx][frame_idx];
+
+                    // Fetch decoder structures constrained by thread limit 't' (Hardware Limits)
+                    auto& state = decoupled_states_[buf_idx][t];
+                    auto& jpeg_stream = jpeg_streams_[buf_idx][t];
+                    auto& pinned_buf = pinned_buffers_[buf_idx][t];
+                    auto& device_buf = device_buffers_[buf_idx][t];
+
+                    // Read File to RAM
+                    std::ifstream file(status.filename, std::ios::in | std::ios::binary | std::ios::ate);
+                    if (!file) {
+                        status.err = CudaError(ERROR_SOURCE, "Cannot read file.");
+                        return status;
+                    }
+
+                    size_t file_size = file.tellg();
+                    file.seekg(0, std::ios::beg);
+
+                    std::vector<uint8_t> local_raw_data(file_size + GPU_DMA_PADDING_BYTES, 0);
+                    if (!file.read(reinterpret_cast<char*>(local_raw_data.data()), file_size)) {
+                        status.err = CudaError(ERROR_SOURCE, "File read failure.");
+                        return status;
+                    }
+
+                    // Magic byte check (Protects NVJPEG engine from faulting on standard text/invalid files)
+                    if (file_size < 2 || local_raw_data[0] != 0xFF || local_raw_data[1] != 0xD8) {
+                        status.err = CudaError(ERROR_SOURCE, "Invalid JPEG magic bytes.");
+                        return status;
+                    }
+
+                    // CPU Phase
+                    CUDA_TRY_LAMBDA(nvjpegStateAttachDeviceBuffer(state, device_buf), status);
+                    CUDA_TRY_LAMBDA(nvjpegStateAttachPinnedBuffer(state, pinned_buf), status);
+                    CUDA_TRY_LAMBDA(nvjpegJpegStreamParse(nvjpeg_handle_, local_raw_data.data(), file_size, 0, 0, jpeg_stream), status);
+
+                    int channels, widths[NVJPEG_MAX_COMPONENT], heights[NVJPEG_MAX_COMPONENT];
+                    nvjpegChromaSubsampling_t subsampling;
+                    CUDA_TRY_LAMBDA(nvjpegGetImageInfo(nvjpeg_handle_, local_raw_data.data(), file_size, &channels, &subsampling, widths, heights), status);
+
+                    status.width = widths[0];
+                    status.height = heights[0];
+                    status.channels = channels;
+
+                    CUDA_TRY_LAMBDA(nvjpegDecodeJpegHost(nvjpeg_handle_, jpeg_decoder_, state, decode_params_, jpeg_stream), status);
+
+                    // GPU Phase
+                    // Wait for main thread to finish processing this memory block from the previous cycle
+                    CUDA_TRY_LAMBDA(cudaEventSynchronize(*dma_complete_event_[buf_idx]), status);
+
+                    size_t plane_size = status.width * status.height;
+                    CUDA_TRY_LAMBDA(res.decoded_pixels.resize(plane_size * status.channels, local_stream), status);
+
+                    nvjpegImage_t destImage;
+                    destImage.channel[0] = res.decoded_pixels.data();
+                    destImage.channel[1] = res.decoded_pixels.data() + plane_size;
+                    destImage.channel[2] = res.decoded_pixels.data() + 2 * plane_size;
+                    destImage.pitch[0] = status.width;
+                    destImage.pitch[1] = status.width;
+                    destImage.pitch[2] = status.width;
+
+                    CUDA_TRY_LAMBDA(nvjpegDecodeJpegTransferToDevice(nvjpeg_handle_, jpeg_decoder_, state, jpeg_stream, local_stream), status);
+                    CUDA_TRY_LAMBDA(nvjpegDecodeJpegDevice(nvjpeg_handle_, jpeg_decoder_, state, &destImage, local_stream), status);
+
+                    // Thread Synchronization
+                    // Ensure the transfer is finished before releasing 'local_raw_data' and yielding to the main thread
+                    CUDA_TRY_LAMBDA(cudaStreamSynchronize(local_stream), status);
+
+                    status.success = true;
+                    return status;
+                }();
+                thread_statuses.push_back(frame_status);
+            }
+            return thread_statuses;
+        });
+    }
 }
 
 } // namespace cropandweed

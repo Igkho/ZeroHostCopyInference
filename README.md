@@ -228,26 +228,32 @@ Benchmarks performed on **NVIDIA RTX 3060 Ti** and on **NVIDIA Jetson Orin Nano*
 **Model:** YOLOv8 Medium (YOLOv8m) @ 1024x1024 Resolution.
 
 ### 1. Infrastructure Ceiling (Stub Mode) - RTX 3060 Ti
-To measure the raw overhead of the pipeline architecture (I/O latency), a pass-through (Stub) detector should be used.
+To measure the raw overhead of the pipeline architecture (I/O latency), a pass-through (Stub) detector is used.
 
-| Metric | Result | Notes |
-| :--- | :--- | :--- |
-| **Throughput** | **~300 FPS** | Maximum theoretical speed without AI model. |
-| **Latency** | **3.3 ms** | Combined Decoding + Memory Management overhead. |
+| Input Type | Throughput | Decode Latency | Notes |
+| :--- | :--- | :--- | :--- |
+| **Video Stream (FFMpeg)** | **~300 FPS** | **~3.3 ms** | Standard sequential hardware decoding limit. |
+| **Image Directory (NVJpeg)** | **~450 FPS** | **~1.38 ms** | Utilizes multi-threaded async decoding & double-buffering. |
 
 ### 2. Real-World Inference (TensorRT INT8 Mode) - RTX 3060 Ti
 Running **YOLOv8m** (Explicitly Quantized INT8) with full object tracking and NVJpeg output.
 
+#### Scenario A: Video Stream (FFmpeg Source)
 | Metric | Result | Notes |
 | :--- | :--- | :--- |
 | **Total Throughput** | **~165 FPS** | Wall time (End-to-End). **>2.5x Real-Time**. |
-| **Bottleneck Shift** | **Decoding** | Inference is now so fast (3.36ms) that Video Decoding (4.83ms) has become the primary bottleneck. |
+| **Bottleneck** | **Decoding** | Inference is so fast (~3.36ms) that standard Video Decoding (~4.83ms) restricts the pipeline. |
 
-**Workload Distribution (Active Work):**
-* **Decoding (Source):** ~4.83 ms/frame (46.91% load)
-* **Inference (Detector):** ~3.36 ms/frame (32.66% load)
-* **Storage (Sink):** ~2.10 ms/frame (20.43% load)
+#### Scenario B: Image Directory (NVJpeg Source)
+| Metric | Result | Notes |
+| :--- | :--- | :--- |
+| **Total Throughput** | **~215 FPS** | Wall time (End-to-End). **>3.5x Real-Time**. |
+| **Bottleneck Reversal** | **Inference** | Async double-buffering drops decode time to ~2.51ms, shifting the bottleneck back to the AI model. |
 
+**Workload Distribution (Image Directory Active Work):**
+* **Decoding (Source):** ~2.51 ms/frame (32.01% load)
+* **Inference (Detector):** ~3.78 ms/frame (48.26% load)
+* **Storage (Sink):** ~1.55 ms/frame (19.73% load)
 
 ### 3. Backend & Precision Comparison - RTX 3060 Ti
 Both **TensorRT** (Highly Optimized) and **ONNX Runtime** (Generic Compatibility) are supported.

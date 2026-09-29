@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <future>
 #include <nvjpeg.h>
 #include <cuda_runtime.h>
 #include "Interfaces.h"
@@ -11,13 +12,30 @@
 
 namespace cropandweed {
 
-// Encapsulated state for Double Buffered SSD writes
+// Wrapper struct required by CUDA_TRY_LAMBDA for thread safety and error isolation
+struct NVJpegEncodeStatus {
+    CudaError err;
+    bool success = false;
+    std::string filename;
+};
+
+// Encapsulated state combining double buffering with a Logical Encoder Pool
 struct EncodeState {
     HostStagingBlock<uint8_t> pinned_buffer;
+    Block<uint8_t> device_decode_buffer;
+
     std::vector<size_t> lengths;
     std::vector<std::string> filenames;
     std::unique_ptr<CudaEvent> dma_complete_event;
-    bool has_data = false;
+
+    // Fixed pool of logical encoders to balance concurrency and VRAM
+    static constexpr int ENCODERS_PER_BUFFER = 2;
+    std::vector<nvjpegEncoderState_t> encoder_states;
+    std::vector<std::unique_ptr<CudaStream>> encode_streams;
+
+    // Returning a vector of statuses to isolate per-frame failures
+    std::vector<std::future<std::vector<NVJpegEncodeStatus>>> async_tasks;
+
     int batch_size = 0;
 };
 
@@ -48,9 +66,6 @@ private:
 
     CudaError Init();
 
-    // Encapsulated helper for parallel SSD flushing
-    CudaError FlushBufferToDisk(EncodeState& buf);
-
     std::string output_path_;
     ModelProperties modelProps_;
 
@@ -59,13 +74,11 @@ private:
 
     nvjpegHandle_t nvjpeg_handle_ = nullptr;
     nvjpegEncoderParams_t encode_params_ = nullptr;
-    std::vector<nvjpegEncoderState_t> encoder_states_;
-
-    Block<uint8_t> device_decode_buffer_;
 
     // Double Buffering Execution State
     EncodeState staging_buffers_[2];
     int active_buffer_ = 0;
+    bool is_closed_ = false;
 };
 
 } // namespace cropandweed

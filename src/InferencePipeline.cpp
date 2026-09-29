@@ -59,12 +59,13 @@ CudaError InferencePipeline::Run() {
         }
 
         sw.Start();
-        CUDA_TRY(source_->GetNextBatch(batch, batchSize_, process));
-        double elapsed = sw.Stop();
+        // Capture execution time safely regardless of success/EOF
+        CudaError srcErr = source_->GetNextBatch(batch, batchSize_, process);
+        stats_.totalDecodingMs = stats_.totalDecodingMs + sw.Stop();
+        CUDA_TRY(srcErr);
 
         if (process) {
             // Accumulate Stats
-            stats_.totalDecodingMs = stats_.totalDecodingMs + elapsed;
             stats_.totalBatches++;
             stats_.totalFrames = stats_.totalFrames + (int)batch.batchSize;
 
@@ -107,10 +108,11 @@ void InferencePipeline::inferenceWorker() {
         if (preProcessQueue_.TryPop(batch, std::chrono::milliseconds(100))) {
             try {
                 sw.Start();
-                CUDA_CALL(detector_->Detect(batch, results));
-                double elapsed = sw.Stop();
 
-                stats_.totalDetectionMs = stats_.totalDetectionMs + elapsed;
+                // Stop timer before evaluating the error macro
+                CudaError detErr = detector_->Detect(batch, results);
+                stats_.totalDetectionMs = stats_.totalDetectionMs + sw.Stop();
+                CUDA_CALL(detErr);
 
                 // Push successful result
                 postProcessQueue_.Push({std::move(batch), std::move(results)});
@@ -136,9 +138,10 @@ void InferencePipeline::outputWorker() {
         if (postProcessQueue_.TryPop(item, std::chrono::milliseconds(100))) {
             try {
                 sw.Start();
-                CUDA_CALL(sink_->Save(item.first, item.second));
-                double elapsed = sw.Stop();
-                stats_.totalSinkMs = stats_.totalSinkMs + elapsed;
+                // Stop timer before evaluating the error macro
+                CudaError sinkErr = sink_->Save(item.first, item.second);
+                stats_.totalSinkMs = stats_.totalSinkMs + sw.Stop();
+                CUDA_CALL(sinkErr);
             } catch (const std::exception& e) {
                 // Log but don't necessarily kill the pipeline for one bad frame save
                 std::cerr << "Pipeline Sink Error: " << e.what() << std::endl;
@@ -156,8 +159,10 @@ void InferencePipeline::outputWorker() {
     // Pipeline is shutting down. Safely flush the final batch and capture its execution time.
     try {
         sw.Start();
-        CUDA_CALL(sink_->Close());
+        // Ensure the critical blocking Close() time is accurately tracked even if it returns an error
+        CudaError closeErr = sink_->Close();
         stats_.totalSinkMs = stats_.totalSinkMs + sw.Stop();
+        CUDA_CALL(closeErr);
     } catch (const std::exception& e) {
         std::cerr << "Pipeline Sink Close Error: " << e.what() << std::endl;
     } catch (...) {
