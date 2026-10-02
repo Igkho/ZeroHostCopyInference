@@ -43,10 +43,6 @@ void DecodeResource::DestroyHardwareSurfaces() {
         NvBufSurfaceDestroy(pitch_linear_surf);
         pitch_linear_surf = nullptr;
     }
-    // if (block_linear_fd != -1) {
-    //     close(block_linear_fd);
-    //     block_linear_fd = -1;
-    // }
     // Do not manually close block_linear_fd! NvJPEGDecoder owns it.
     block_linear_fd = -1;
 }
@@ -138,9 +134,14 @@ CudaError MMAPIJpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, b
     // Save the frame count before dispatching the next batch
     int current_chunk_frames = frames_in_buffer_[buf_idx];
 
-    // 1. Check for End of Stream
-    if (frames_in_buffer_[buf_idx] == 0) {
+    // Check for End of Stream
+    if (current_chunk_frames == 0) {
         process = false;
+        // Explicitly clear metadata on EOF.
+        // If this was reached via a recursive call skipping corrupt frames,
+        // the parent call's Init() already set batchSize to the requested capacity.
+        outBatch.batchSize = 0;
+        outBatch.sourceIdentifiers.clear();
         return CudaError();
     }
 
@@ -148,7 +149,11 @@ CudaError MMAPIJpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, b
         return CudaError(ERROR_SOURCE, "Requested batchSize exceeds pre-allocated pool");
     }
 
-    // 2. Gather Async Threads together
+    // Safe VRAM/Event Warm-Up
+    // Uses requested target sizes. Fast O(1) no-op if recycled.
+    CUDA_TRY(outBatch.Init(batchSize, targetW_, targetH_, *cuda_stream_));
+
+    // Gather Async Threads together
     std::vector<MMAPIDecodeStatus> valid_statuses;
 
     // Calculate EXACTLY how many threads were actually dispatched for this chunk
@@ -182,12 +187,7 @@ CudaError MMAPIJpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, b
         return CudaError(); // Let pipeline retry
     }
 
-    // 3. Setup GPU Output Layout
-    size_t framePixelsTarget = targetW_ * targetH_;
-    CUDA_TRY(outBatch.deviceData.resize(batchSize * framePixelsTarget * 3, *cuda_stream_));
-    outBatch.sourceIdentifiers.clear();
-
-    // 4. Main-Thread EGL Mapping & CUDA Kernel Dispatch
+    // Main-Thread EGL Mapping & CUDA Kernel Dispatch
     for (int k = 0; k < validCount; ++k) {
         const MMAPIDecodeStatus& status = valid_statuses[k];
         int i = status.batch_index;
@@ -225,39 +225,37 @@ CudaError MMAPIJpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, b
 
         // Dispatch CUDA Texture conversion
         CUDA_TRY(MapAndConvert(res, outBatch.deviceData.data(), k, *cuda_stream_));
-        outBatch.sourceIdentifiers.push_back(std::to_string(frameCounter_ + i));
-
-        // // True Filename Passthrough
-        // std::string stem = fs::path(status.filename).stem().string();
-        // outBatch.sourceIdentifiers.push_back(stem);
+        // Fast stack-based formatting (Zero Allocation)
+        char id_buf[16];
+        std::snprintf(id_buf, sizeof(id_buf), "%04zu", frameCounter_ + i);
+        // Direct assignment from stack buffer (Reuses string memory/SSO)
+        outBatch.sourceIdentifiers[k] = id_buf;
     }
 
-    // 5. Zero-fill padding (if batch is incomplete)
+    // Zero-fill padding (if batch is incomplete)
     if (validCount < batchSize) {
-        size_t offset = validCount * framePixelsTarget * 3;
+        size_t offset = validCount * targetW_ * targetH_ * 3;
         CUDA_TRY(outBatch.deviceData.fill_back(offset, 0.0f, *cuda_stream_));
     }
 
-    // 6. Write the conversion finish event into the stream (Releases buffer for next cycle)
+    //  Write the conversion finish event into the stream (Releases buffer for next cycle)
     CUDA_TRY(cudaEventRecord(*dma_complete_event_[buf_idx], *cuda_stream_));
 
-    if (!outBatch.readyEvent) {
-        CUDA_TRY(CudaEvent::Create(outBatch.readyEvent));
-    }
     CUDA_TRY(cudaEventRecord(*outBatch.readyEvent, *cuda_stream_));
 
-    // 7. Fire all async threads for the next cycle for this buffer
+    // Fire all async threads for the next cycle for this buffer
     DispatchAsyncBatch(buf_idx);
 
-    // 8. Switch current buffers set
+    // Switch current buffers set
     outBatch.batchId = frameCounter_ / batchSize;
     frameCounter_ += current_chunk_frames;
     outBatch.batchSize = validCount;
-    outBatch.width = targetW_;
-    outBatch.height = targetH_;
+
+    // Truncate the identifiers vector to match actual valid frames.
+    outBatch.sourceIdentifiers.resize(validCount);
+
     process = true;
     active_buffer_ = (active_buffer_ + 1) & 0x01;
-    // std::cout << "Batch is decoded: " << outBatch.batchId << std::endl;
 
     return CudaError();
 }

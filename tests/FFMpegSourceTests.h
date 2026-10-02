@@ -203,6 +203,41 @@ TEST_F(FFmpegSourceTest, VerifyRGBContent) {
     }
 }
 
+TEST_F(FFmpegSourceTest, GeneratesZeroPaddedIdentifiers) {
+    if (!video_available_) GTEST_SKIP() << "Moving.mp4 not found.";
+
+    int batchSize = 2;
+    std::unique_ptr<ISource> source;
+    // FFmpegSource::Create doesn't take batchSize in its constructor
+    ASSERT_CUDA_SUCCESS(FFmpegSource::Create(source, video_path_.string(), 64, 64));
+
+    BatchData batch;
+    bool process = false;
+
+    // Fetch First Batch
+    ASSERT_CUDA_SUCCESS(source->GetNextBatch(batch, batchSize, process));
+    ASSERT_TRUE(process);
+
+    // Moving.mp4 has ~120 frames, so the first batch will definitely be full.
+    ASSERT_EQ(batch.sourceIdentifiers.size(), batchSize) << "Vector size must match valid frames";
+
+    // Verify 4-digit zero-padding and sequence
+    EXPECT_EQ(batch.sourceIdentifiers[0], "0000");
+    EXPECT_EQ(batch.sourceIdentifiers[1], "0001");
+
+    if (batch.readyEvent) {
+        cudaEventSynchronize(*batch.readyEvent);
+    }
+
+    // Fetch Second Batch to ensure frameCounter_ persists correctly
+    ASSERT_CUDA_SUCCESS(source->GetNextBatch(batch, batchSize, process));
+    ASSERT_TRUE(process);
+    ASSERT_EQ(batch.sourceIdentifiers.size(), batchSize);
+
+    EXPECT_EQ(batch.sourceIdentifiers[0], "0002");
+    EXPECT_EQ(batch.sourceIdentifiers[1], "0003");
+}
+
 // ==========================================
 // 2. Kernel Tests (Direct Invocation)
 // ==========================================

@@ -153,6 +153,11 @@ CudaError NVJpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, bool
     // 1. Check for End of Stream
     if (current_chunk_frames == 0) {
         process = false;
+        // Explicitly clear metadata on EOF.
+        // If this was reached via a recursive call skipping corrupt frames,
+        // the parent call's Init() already set batchSize to the requested capacity.
+        outBatch.batchSize = 0;
+        outBatch.sourceIdentifiers.clear();
         return CudaError();
     }
 
@@ -160,7 +165,11 @@ CudaError NVJpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, bool
         return CudaError(ERROR_SOURCE, "Requested batchSize exceeds pre-allocated pool");
     }
 
-    // 2. Gather Async Threads together
+    // Safe VRAM/Event Warm-Up
+    // Uses requested target sizes. Fast O(1) no-op if recycled.
+    CUDA_TRY(outBatch.Init(batchSize, targetW_, targetH_, *cuda_stream_));
+
+    // Gather Async Threads together
     std::vector<NVJpegDecodeStatus> valid_statuses;
     int num_threads = std::min(current_chunk_frames, DECODERS_PER_BUFFER);
 
@@ -187,12 +196,8 @@ CudaError NVJpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, bool
         return GetNextBatch(outBatch, batchSize, process);
     }
 
-    // 3. Setup GPU Output Layout
     size_t framePixelsTarget = targetW_ * targetH_;
-    CUDA_TRY(outBatch.deviceData.resize(batchSize * framePixelsTarget * 3, *cuda_stream_));
-    outBatch.sourceIdentifiers.clear();
-
-    // 4. Main-Thread Operations (Color Conversion)
+    // Main-Thread Operations (Color Conversion)
     for (int k = 0; k < validCount; ++k) {
         const NVJpegDecodeStatus& status = valid_statuses[k];
         int i = status.batch_index;
@@ -208,32 +213,35 @@ CudaError NVJpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, bool
             status.width, status.height, status.width,
             batch_dst, targetW_, targetH_, *cuda_stream_));
 
-        outBatch.sourceIdentifiers.push_back(std::to_string(frameCounter_ + i));
+        // Fast stack-based formatting (Zero Allocation)
+        char id_buf[16];
+        std::snprintf(id_buf, sizeof(id_buf), "%04zu", frameCounter_ + i);
+        // Direct assignment from stack buffer (Reuses string memory/SSO)
+        outBatch.sourceIdentifiers[k] = id_buf;
     }
 
-    // 5. Zero-fill padding (if batch is incomplete)
+    // Zero-fill padding (if batch is incomplete)
     if (validCount < batchSize) {
         size_t offset = validCount * framePixelsTarget * 3;
         CUDA_TRY(outBatch.deviceData.fill_back(offset, 0.0f, *cuda_stream_));
     }
 
-    // 6. Write the conversion finish event (Releases memory for async threads on next cycle)
+    // Write the conversion finish event (Releases memory for async threads on next cycle)
     CUDA_TRY(cudaEventRecord(*dma_complete_event_[buf_idx], *cuda_stream_));
 
-    if (!outBatch.readyEvent) {
-        CUDA_TRY(CudaEvent::Create(outBatch.readyEvent));
-    }
     CUDA_TRY(cudaEventRecord(*outBatch.readyEvent, *cuda_stream_));
 
-    // 7. Fire all async threads for the next cycle for this buffer
+    // Fire all async threads for the next cycle for this buffer
     DispatchAsyncBatch(buf_idx);
 
-    // 8. Switch current buffers set
+    // Switch current buffers set
     outBatch.batchId = frameCounter_ / batchSize;
     frameCounter_ += current_chunk_frames;
     outBatch.batchSize = validCount;
-    outBatch.width = targetW_;
-    outBatch.height = targetH_;
+
+    // Truncate the identifiers vector to match actual valid frames.
+    outBatch.sourceIdentifiers.resize(validCount);
+
     process = true;
     active_buffer_ = (active_buffer_ + 1) & 0x01;
 

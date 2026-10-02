@@ -232,6 +232,14 @@ To measure the raw overhead of the pipeline architecture (I/O latency), a pass-t
 
 | Input Type | Throughput | Decode Latency | Notes |
 | :--- | :--- | :--- | :--- |
+| **Video Stream (FFMpeg)** | **~300 - 470 FPS** | **~2.1 - 3.3 ms** | Hardware decoding limit. Scales heavily based on the codec used (H.264 vs H.265). |
+| **Image Directory (NVJpeg)** | **~430+ FPS** | **~1.38 ms** | Utilizes multi-threaded async decoding & double-buffering. |
+
+### 1. Infrastructure Ceiling (Stub Mode) - RTX 3060 Ti
+To measure the raw overhead of the pipeline architecture (I/O latency), a pass-through (Stub) detector is used.
+
+| Input Type | Throughput | Decode Latency | Notes |
+| :--- | :--- | :--- | :--- |
 | **Video Stream (FFMpeg)** | **~300 FPS** | **~3.3 ms** | Standard sequential hardware decoding limit. |
 | **Image Directory (NVJpeg)** | **~450 FPS** | **~1.38 ms** | Utilizes multi-threaded async decoding & double-buffering. |
 
@@ -241,8 +249,21 @@ Running **YOLOv8m** (Explicitly Quantized INT8) with full object tracking and NV
 #### Scenario A: Video Stream (FFmpeg Source)
 | Metric | Result | Notes |
 | :--- | :--- | :--- |
-| **Total Throughput** | **~165 FPS** | Wall time (End-to-End). **>2.5x Real-Time**. |
-| **Bottleneck** | **Decoding** | Inference is so fast (~3.36ms) that standard Video Decoding (~4.83ms) restricts the pipeline. |
+| **Throughput (H.264)** | **~165 FPS** | Baseline format (AVC). Wall time (End-to-End). **>2.5x Real-Time**. |
+| **Throughput (H.265)** | **~190+ FPS** | High-efficiency format (HEVC). Processing larger CTU blocks removes hardware scheduling penalties at larger batch sizes. **>3x Real-Time**. |
+| **Bottleneck** | **Decoding** | Inference is so fast (~3.36ms) that for both video formats, decoding remains the most demanding stage (~46% active work load for H.265 vs ~41% for inference). |
+
+#### Hardware Decoding Benchmarks (H.264 vs H.265)
+The pipeline automatically configures the NVDEC hardware decoder based on the input stream format. You can test the throughput differences using the provided sample videos:
+
+**Standard H.264 Benchmark:**
+```bash
+./ZeroCopyInference -i ../video/Moving.mp4 --backend trt --model best_int8.onnx -b 16 -o Moving
+```
+**High-Efficiency H.265 (HEVC) Benchmark:**
+```bash
+./ZeroCopyInference -i ../video/Moving_h265.mp4 --backend trt --model best_int8.onnx -b 16 -o Moving_h265
+```
 
 #### Scenario B: Image Directory (NVJpeg Source)
 | Metric | Result | Notes |

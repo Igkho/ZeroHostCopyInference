@@ -256,15 +256,7 @@ CudaError TrtDetector::Detect(const BatchData& input, BatchDetections &output) {
     CUDA_TRY(res.candidateCount.fill(0, *cuda_stream_));
 
     // Resize Output Structure (validBatchSize)
-    size_t resultSize = validBatchSize * BatchDetections::MAX_DETECTIONS_PER_FRAME;
-    CUDA_TRY(output.data.resize(resultSize, *cuda_stream_));
-
-    CUDA_TRY(output.counts.resize(validBatchSize, *cuda_stream_));
-    CUDA_TRY(output.counts.fill(0, *cuda_stream_));
-
-    if (!output.readyEvent) {
-        CUDA_TRY(CudaEvent::Create(output.readyEvent));
-    }
+    CUDA_TRY(output.Init(validBatchSize, *cuda_stream_));
 
     // Inference
     // Set the memory address for each tensor by name

@@ -165,15 +165,8 @@ CudaError OnnxDetector::Detect(const BatchData& input, BatchDetections &output) 
     CUDA_TRY(res.candidateCount.resize(1, *cuda_stream_));
     CUDA_TRY(res.candidateCount.fill(0, *cuda_stream_));
 
-    CUDA_TRY(output.data.resize(validBatchSize * BatchDetections::MAX_DETECTIONS_PER_FRAME, *cuda_stream_));
+    CUDA_TRY(output.Init(validBatchSize, *cuda_stream_));
 
-    CUDA_TRY(output.counts.resize(validBatchSize, *cuda_stream_));
-    CUDA_TRY(output.counts.fill(0, *cuda_stream_));
-
-    // Ensure Events exist
-    if (!output.readyEvent) {
-        CUDA_TRY(CudaEvent::Create(output.readyEvent));
-    }
     try {
         // Setup Input Shape [engineBatchSize, 3, H, W]
         std::vector<int64_t> inputShape = {

@@ -96,8 +96,8 @@ CudaError FFmpegSource::Init() {
 
     decCtx_->hw_device_ctx = av_buffer_ref(hwDeviceCtx_);
 
-    // Increase internal AV codec buffer to 32 surface NVDEC limit
-    decCtx_->extra_hw_frames = 21;
+    // Increasee the concurrent threads count
+    decCtx_->thread_count = 2;
 
     if (avcodec_open2(decCtx_, decoder, nullptr) < 0) {
         return CudaError(ERROR_SOURCE, "Failed to open codec");
@@ -142,18 +142,12 @@ CudaError FFmpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, bool
     int outH = (targetH_ > 0) ? targetH_ : height_;
 
     outBatch.batchId = frameCounter_ / batchSize;
-    outBatch.width = outW;
-    outBatch.height = outH;
-    outBatch.batchSize = 0;
-    outBatch.sourceIdentifiers.clear();
 
-    size_t totalFloats = (outW * outH * 3) * batchSize;
-    CUDA_TRY(outBatch.deviceData.resize(totalFloats, *cuda_stream_));
+    // Safe VRAM/Event Warm-Up
+    // Uses requested target sizes. Fast O(1) no-op if recycled.
+    CUDA_TRY(outBatch.Init(batchSize, outW, outH, *cuda_stream_));
 
     int buf_idx = active_buffer_;
-    // Safely sync the CPU here to guarantee the custom kernel has finished
-    // reading from this specific ping-pong buffer.
-//    CUDA_TRY(cudaEventSynchronize(*dma_complete_event_[buf_idx]));
 
     // GPU-level sync replaces CPU-level sync.
     // Instructs NVDEC to wait for TRT before copying over this memory buffer,
@@ -211,8 +205,13 @@ CudaError FFmpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, bool
 
                 // Release HW frame immediately. Protects the tiny 12-surface NVDEC pool.
                 av_frame_unref(gpuFrame_);
+                // Fast stack-based formatting (Zero Allocation)
+                char id_buf[16];
+                std::snprintf(id_buf, sizeof(id_buf), "%04zu", frameCounter_);
+                // Direct assignment from stack buffer (Reuses string memory/SSO)
+                outBatch.sourceIdentifiers[framesCollected] = id_buf;
 
-                outBatch.sourceIdentifiers.push_back(std::to_string(frameCounter_++));
+                frameCounter_++;
                 framesCollected++;
             } else {
 
@@ -284,23 +283,8 @@ CudaError FFmpegSource::GetNextBatch(BatchData& outBatch, size_t batchSize, bool
             CUDA_TRY(outBatch.deviceData.fill_back(offset, 0.0f, *cuda_stream_));
         }
 
-        if (!outBatch.readyEvent) {
-            CUDA_TRY(CudaEvent::Create(outBatch.readyEvent));
-        }
-        // Try to record
-        cudaError_t err = cudaEventRecord(*outBatch.readyEvent, *cuda_stream_);
+        CUDA_TRY(cudaEventRecord(*outBatch.readyEvent, *cuda_stream_));
 
-        // If handle is invalid (stale recycled event), recreate and retry
-        if (err == cudaErrorInvalidResourceHandle) {
-            std::cerr << "[FFmpegSource] Recycled event handle was invalid. Recreating..." << std::endl;
-            CUDA_TRY(CudaEvent::Create(outBatch.readyEvent)); // Replaces old event
-            CUDA_TRY(cudaEventRecord(*outBatch.readyEvent, *cuda_stream_)); // Retry
-        } else {
-            if (err != cudaSuccess) {
-            // Propagate other errors manually
-                return CudaError(ERROR_SOURCE, err);
-            }
-        }
     }
     // Record that custom stream is finished with the hardware frames
     CUDA_TRY(cudaEventRecord(*dma_complete_event_[buf_idx], *cuda_stream_));

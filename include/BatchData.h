@@ -33,7 +33,9 @@ struct BatchData {
         CUDA_TRY(deviceData.resize(batchSize * width * height * 3, stream)); // Assuming 3 channels (RGB/Planar)
 
         // Init Event
-        CUDA_TRY(CudaEvent::Create(readyEvent, cudaStreamNonBlocking));
+        if (!readyEvent) {
+            CUDA_TRY(CudaEvent::Create(readyEvent, cudaStreamNonBlocking));
+        }
 
         // Reserve CPU strings (optional optimization)
         sourceIdentifiers.resize(batchSize);

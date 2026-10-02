@@ -303,4 +303,36 @@ TEST_F(MMAPIJpegSourceTest, PartialBatchMaintainsStrictEngineCapacityAndZeroPads
     EXPECT_DOUBLE_EQ(paddingSum, 0.0) << "Padding frames must be zero-filled to prevent NaN poisoning";
 }
 
+TEST_F(MMAPIJpegSourceTest, GeneratesZeroPaddedIdentifiers) {
+    int batchSize = 2;
+    CreateDummyJpegs(4); // Creates 4 valid frames to yield 2 full batches
+
+    std::unique_ptr<ISource> source;
+    ASSERT_CUDA_SUCCESS(MMAPIJpegSource::Create(source, test_dir_.string(), 64, 64, batchSize));
+
+    BatchData batch;
+    bool process = false;
+
+    // Fetch First Batch
+    ASSERT_CUDA_SUCCESS(source->GetNextBatch(batch, batchSize, process));
+    ASSERT_TRUE(process);
+    ASSERT_EQ(batch.sourceIdentifiers.size(), 2) << "Vector size must match valid frames";
+
+    // Verify 4-digit zero-padding and sequence
+    EXPECT_EQ(batch.sourceIdentifiers[0], "0000");
+    EXPECT_EQ(batch.sourceIdentifiers[1], "0001");
+
+    if (batch.readyEvent) {
+        cudaEventSynchronize(*batch.readyEvent);
+    }
+
+    // Fetch Second Batch to ensure frameCounter_ persists correctly
+    ASSERT_CUDA_SUCCESS(source->GetNextBatch(batch, batchSize, process));
+    ASSERT_TRUE(process);
+    ASSERT_EQ(batch.sourceIdentifiers.size(), 2);
+
+    EXPECT_EQ(batch.sourceIdentifiers[0], "0002");
+    EXPECT_EQ(batch.sourceIdentifiers[1], "0003");
+}
+
 } // namespace cropandweed
