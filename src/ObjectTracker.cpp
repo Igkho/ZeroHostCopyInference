@@ -14,6 +14,8 @@ CudaError ObjectTracker::Init(int maxTracks, int numClasses, cudaStream_t stream
     CUDA_TRY(tracks_.resize(maxTracks_, stream));
     CUDA_TRY(tempTracks_.resize(maxTracks_, stream));
 
+    CUDA_TRY(trackClaims_.resize(maxTracks_, stream)); // Allocate claims buffer
+
     CUDA_TRY(trackCount_.resize(1, stream));
     CUDA_TRY(trackCount_.fill(0, stream));
     trackCountHost_ = std::vector<int>{0};
@@ -37,6 +39,8 @@ CudaError ObjectTracker::ProcessBatch(int batchIndex,
                                       int height,
                                       cudaStream_t stream)
 {
+    CUDA_TRY(trackClaims_.fill_zero(stream));
+
     CUDA_TRY(TrackBatch(batchIndex,
                         detections,
                         countBuffer,
@@ -46,6 +50,7 @@ CudaError ObjectTracker::ProcessBatch(int batchIndex,
                         trackCountHost_,
                         nextTrackId_,
                         detectionMatches_,
+                        trackClaims_,
                         maxDetectionsStride,
                         maxTracks_,
                         numClasses_,

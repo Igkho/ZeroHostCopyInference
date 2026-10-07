@@ -61,6 +61,7 @@ private:
     Block<int> nextTrackId_;
     Block<int> detectionMatches_;
     std::vector<int> countBufferHost_;
+    TypedBlock<unsigned long long> trackClaims_;
 
     int maxTracks_ = 0;
     int numClasses_ = 0;

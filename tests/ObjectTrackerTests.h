@@ -28,11 +28,13 @@ protected:
         Block<int> nextTrackId;
         Block<int> matches;
         std::vector<int> countBufferHost;
+        TypedBlock<unsigned long long> trackClaims;
 
         int maxTracks = 100;
 
         void Init() {
             ASSERT_CUDA_SUCCESS(tracks.resize(maxTracks));
+            ASSERT_CUDA_SUCCESS(trackClaims.resize(maxTracks));
             // Initialize with 0 tracks
             ASSERT_CUDA_SUCCESS(trackCount.assign({0}));
             ASSERT_CUDA_SUCCESS(nextTrackId.assign({1}));
@@ -60,6 +62,7 @@ TEST_F(ObjectTrackerTest, CreatesNewTrack) {
 
     ASSERT_CUDA_SUCCESS(d_dets.assign(dets));
     ASSERT_CUDA_SUCCESS(d_detCount.assign({(int)dets.size()}));
+    ASSERT_CUDA_SUCCESS(ctx.trackClaims.fill_zero());
 
     // 2. Run Kernel Wrapper Directly
     ASSERT_CUDA_SUCCESS(TrackBatch(
@@ -72,6 +75,7 @@ TEST_F(ObjectTrackerTest, CreatesNewTrack) {
         ctx.trackCountHost,
         ctx.nextTrackId,
         ctx.matches,
+        ctx.trackClaims,
         100, // Stride
         ctx.maxTracks,
         1,   // Active Classes
@@ -123,12 +127,13 @@ TEST_F(ObjectTrackerTest, UpdatesExistingTrack) {
 
     ASSERT_CUDA_SUCCESS(d_dets.assign(dets));
     ASSERT_CUDA_SUCCESS(d_detCount.assign({1}));
+    ASSERT_CUDA_SUCCESS(ctx.trackClaims.fill_zero());
 
     // 3. Run Tracking
     ASSERT_CUDA_SUCCESS(TrackBatch(
         0, d_dets, d_detCount, ctx.countBufferHost,
         ctx.tracks, ctx.trackCount, ctx.trackCountHost, ctx.nextTrackId, ctx.matches,
-        100, ctx.maxTracks, 1, 0.1f, 1024, 1024, 0
+        ctx.trackClaims, 100, ctx.maxTracks, 1, 0.1f, 1024, 1024, 0
         ));
 
     // 4. Verify Updates
@@ -166,12 +171,13 @@ TEST_F(ObjectTrackerTest, GhostsMissingTrack) {
     ASSERT_CUDA_SUCCESS(d_dets.resize(100));
     BoundaryBlock<int> d_detCount;
     ASSERT_CUDA_SUCCESS(d_detCount.assign({0})); // 0 detections
+    ASSERT_CUDA_SUCCESS(ctx.trackClaims.fill_zero());
 
     // 3. Run Tracking
     ASSERT_CUDA_SUCCESS(TrackBatch(
         0, d_dets, d_detCount, ctx.countBufferHost,
         ctx.tracks, ctx.trackCount, ctx.trackCountHost, ctx.nextTrackId, ctx.matches,
-        100, ctx.maxTracks, 1, 0.1f, 1024, 1024, 0
+        ctx.trackClaims, 100, ctx.maxTracks, 1, 0.1f, 1024, 1024, 0
         ));
 
     // 4. Verify Track State (Prediction)
@@ -255,12 +261,13 @@ TEST_F(ObjectTrackerTest, MultiWarpReductionAndGhosting) {
     ASSERT_CUDA_SUCCESS(d_dets.resize(100)); // Room for 40 ghosts
     BoundaryBlock<int> d_detCount;
     ASSERT_CUDA_SUCCESS(d_detCount.assign({0}));
+    ASSERT_CUDA_SUCCESS(ctx.trackClaims.fill_zero());
 
     // 3. Run Tracking
     ASSERT_CUDA_SUCCESS(TrackBatch(
         0, d_dets, d_detCount, ctx.countBufferHost,
         ctx.tracks, ctx.trackCount, ctx.trackCountHost, ctx.nextTrackId, ctx.matches,
-        100, ctx.maxTracks, 1, 0.1f, 1024, 1024, 0
+        ctx.trackClaims, 100, ctx.maxTracks, 1, 0.1f, 1024, 1024, 0
         ));
 
     // 4. Verify output (All 40 tracks should be valid and generate ghosts)
@@ -308,12 +315,13 @@ TEST_F(ObjectTrackerTest, OutlierRejectionByMeanVelocity) {
     ASSERT_CUDA_SUCCESS(d_dets.resize(100));
     BoundaryBlock<int> d_detCount;
     ASSERT_CUDA_SUCCESS(d_detCount.assign({0}));
+    ASSERT_CUDA_SUCCESS(ctx.trackClaims.fill_zero());
 
     // 4. Run Tracking
     ASSERT_CUDA_SUCCESS(TrackBatch(
         0, d_dets, d_detCount, ctx.countBufferHost,
         ctx.tracks, ctx.trackCount, ctx.trackCountHost, ctx.nextTrackId, ctx.matches,
-        100, ctx.maxTracks, 1, 0.1f, 1024, 1024, 0
+        ctx.trackClaims, 100, ctx.maxTracks, 1, 0.1f, 1024, 1024, 0
         ));
 
     // 5. Verify the Outlier was killed
@@ -358,6 +366,7 @@ TEST_F(ObjectTrackerTest, GridStrideHandlesMoreThan1024Tracks) {
     ASSERT_CUDA_SUCCESS(d_dets.resize(3000));
     BoundaryBlock<int> d_detCount;
     ASSERT_CUDA_SUCCESS(d_detCount.assign({0}));
+    ASSERT_CUDA_SUCCESS(ctx.trackClaims.fill_zero());
 
     // Ensure host buffer has space
     ctx.countBufferHost.resize(1, 0);
@@ -366,7 +375,7 @@ TEST_F(ObjectTrackerTest, GridStrideHandlesMoreThan1024Tracks) {
     ASSERT_CUDA_SUCCESS(TrackBatch(
         0, d_dets, d_detCount, ctx.countBufferHost,
         ctx.tracks, ctx.trackCount, ctx.trackCountHost, ctx.nextTrackId, ctx.matches,
-        3000, ctx.maxTracks, 1, 0.1f, 1024, 1024, 0
+        ctx.trackClaims, 3000, ctx.maxTracks, 1, 0.1f, 1024, 1024, 0
         ));
 
     // 6. Verification
@@ -429,12 +438,13 @@ TEST_F(ObjectTrackerTest, FiniteGridStrideLoop) {
     BoundaryBlock<int> d_detCount;
     ASSERT_CUDA_SUCCESS(d_detCount.assign({0}));
     ctx.countBufferHost.resize(1, 0);
+    ASSERT_CUDA_SUCCESS(ctx.trackClaims.fill_zero());
 
     // Run Tracking
     ASSERT_CUDA_SUCCESS(TrackBatch(
         0, d_dets, d_detCount, ctx.countBufferHost,
         ctx.tracks, ctx.trackCount, ctx.trackCountHost, ctx.nextTrackId, ctx.matches,
-        100, ctx.maxTracks, 1, 0.1f, 1024, 1024, 0
+        ctx.trackClaims, 100, ctx.maxTracks, 1, 0.1f, 1024, 1024, 0
         ));
 
     // Verification
@@ -452,6 +462,70 @@ TEST_F(ObjectTrackerTest, FiniteGridStrideLoop) {
     // Track 0 and Track 2048 should generate ghosts.
     // If the 'continue' bug is present, count will be 1. If fixed, count will be 2.
     EXPECT_EQ(h_detCountOut[0], 2) << "Both normal tracks (0 and 2048) must generate ghosts. If count is 1, the stride loop aborted early.";
+}
+
+TEST_F(ObjectTrackerTest, ResolvesDetectionCollision) {
+    TrackerContext ctx;
+    ctx.Init();
+
+    // 1. Seed 1 existing track at (100, 100)
+    TrackState seed = {};
+    seed.id = 1;
+    seed.age = 10;
+    seed.x = 100.f; seed.y = 100.f;
+    seed.w = 50.f; seed.h = 50.f;
+    seed.vx = 0; seed.vy = 0;
+
+    std::vector<TrackState> seedVec(ctx.maxTracks);
+    seedVec[0] = seed;
+
+    ASSERT_CUDA_SUCCESS(ctx.tracks.assign(seedVec));
+    ASSERT_CUDA_SUCCESS(ctx.trackCount.assign({1}));
+
+    // FIX: Advance the global ID counter so the new track gets ID 2
+    ASSERT_CUDA_SUCCESS(ctx.nextTrackId.assign({2}));
+
+    // 2. Input: 2 identical overlapping detections
+    // Both will evaluate the exact same IoU with Track 1
+    std::vector<DetectionRaw> dets = {
+        {100.f, 100.f, 50.f, 50.f, 0.9f, 0.f, 0.f, 0.f}, // Det 0
+        {100.f, 100.f, 50.f, 50.f, 0.8f, 0.f, 0.f, 0.f}  // Det 1
+    };
+
+    BoundaryTypedBlock<DetectionRaw> d_dets;
+    BoundaryBlock<int> d_detCount;
+
+    ASSERT_CUDA_SUCCESS(d_dets.assign(dets));
+    ASSERT_CUDA_SUCCESS(d_detCount.assign({(int)dets.size()}));
+
+    // Ensure the claims buffer is cleanly zeroed before launch
+    ASSERT_CUDA_SUCCESS(ctx.trackClaims.fill_zero());
+
+    // 3. Run Tracking
+    ASSERT_CUDA_SUCCESS(TrackBatch(
+        0, d_dets, d_detCount, ctx.countBufferHost,
+        ctx.tracks, ctx.trackCount, ctx.trackCountHost, ctx.nextTrackId, ctx.matches,
+        ctx.trackClaims, 100, ctx.maxTracks, 1, 0.1f, 1024, 1024, 0
+        ));
+
+    // 4. Verify Resolution
+    std::vector<int> h_trackCount;
+    ASSERT_CUDA_SUCCESS(ctx.trackCount.to_vector(h_trackCount));
+
+    // Old kernel: returns 1 (race condition, one detection is lost).
+    // Fixed kernel: returns 2 (loser correctly falls back and spawns a new track).
+    EXPECT_EQ(h_trackCount[0], 2) << "Collision should be resolved by spawning a new track for the loser.";
+
+    std::vector<TrackState> h_tracks;
+    ASSERT_CUDA_SUCCESS(ctx.tracks.to_vector(h_tracks));
+
+    // The winning detection should have updated Track 1
+    EXPECT_EQ(h_tracks[0].id, 1);
+    EXPECT_EQ(h_tracks[0].age, 11) << "Winning track should increment in age.";
+
+    // The losing detection should have spawned Track 2
+    EXPECT_EQ(h_tracks[1].id, 2);
+    EXPECT_EQ(h_tracks[1].age, 1) << "Losing detection should spawn a brand new track.";
 }
 
 } // namespace cropandweed

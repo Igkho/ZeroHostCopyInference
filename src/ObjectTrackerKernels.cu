@@ -1,10 +1,6 @@
 #include "ObjectTrackerKernels.h"
 #include <cstdio>
 #include "BatchDetections.h"
-//#include <thrust/remove.h>
-//#include <thrust/execution_policy.h>
-//#include <thrust/device_ptr.h>
-//#include <cub/device/device_select.cuh>
 
 namespace cropandweed {
 
@@ -62,18 +58,17 @@ __global__ void PredictTracksKernel(TrackState* __restrict__ tracks,
     t.missedFrames++;
 }
 
-// OPTIMIZED: Assumes 'detections' pointer is already offset to the current batch slice
 __global__ void MatchDetectionsKernel(DetectionRaw* __restrict__ detections,
                                       int numDetections,
                                       TrackState* __restrict__ tracks,
                                       int numTracks,
-                                      int* __restrict__ matches)
+                                      int* __restrict__ matches,
+                                      unsigned long long* __restrict__ trackClaims)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numDetections) return;
 
-    // Direct access, no batch loop needed
-    DetectionRaw myDet = detections[idx];
+    const DetectionRaw &det = detections[idx];
     matches[idx] = -1;
 
     float bestIOU = 0.3f;
@@ -87,20 +82,26 @@ __global__ void MatchDetectionsKernel(DetectionRaw* __restrict__ detections,
             continue;
         }
 
-        float iou = CalculateIOU(myDet, track);
+        float iou = CalculateIOU(det, track);
 
         float requiredIOU = (track.missedFrames > 0) ? 0.45f : 0.30f;
 
-        if (iou > requiredIOU) {
-            if (iou > bestIOU) {
-                bestIOU = iou;
-                bestTrackIdx = t;
-            }
+        if (iou > requiredIOU && iou > bestIOU) {
+            bestIOU = iou;
+            bestTrackIdx = t;
         }
     }
 
     if (bestTrackIdx != -1) {
         matches[idx] = bestTrackIdx;
+
+        // atomicMax Bid Submission ---
+        // High 32 bits: IoU (preserves ordering for values >= 0)
+        // Low 32 bits: Detection index (tie-breaker)
+        unsigned long long iouBits = (unsigned long long)__float_as_uint(bestIOU);
+        unsigned long long claim = (iouBits << 32) | (unsigned int)idx;
+
+        atomicMax(&trackClaims[bestTrackIdx], claim);
     }
 }
 
@@ -111,6 +112,7 @@ __global__ void UpdateTracksKernel(DetectionRaw* __restrict__ detections,
                                    int* __restrict__ numTracks,
                                    int maxTracks,
                                    int* __restrict__ nextTrackId,
+                                   unsigned long long* __restrict__ trackClaims,
                                    int activeClasses,
                                    float alpha,
                                    int width,
@@ -120,8 +122,19 @@ __global__ void UpdateTracksKernel(DetectionRaw* __restrict__ detections,
     if (idx >= numDetections) return;
 
     int trackIdx = matches[idx];
-    DetectionRaw& det = detections[idx];
 
+    // Validate Ownership
+    if (trackIdx != -1) {
+        unsigned long long winningClaim = trackClaims[trackIdx];
+        unsigned int winnerDetIdx = (unsigned int)(winningClaim & 0xFFFFFFFF);
+
+        // If this thread is not the winner, fallback to spawning a new track
+        if ((unsigned int)idx != winnerDetIdx) {
+            trackIdx = -1;
+        }
+    }
+
+    DetectionRaw& det = detections[idx];
     if (trackIdx != -1) {
         TrackState& t = tracks[trackIdx];
 
@@ -215,7 +228,6 @@ __global__ void UpdateTracksKernel(DetectionRaw* __restrict__ detections,
         det.track_id = (float)t.id;
         det.class_id = (float)bestC;
         det.score = maxP;
-//        det.score = abs(t.vx); //sqrtf(t.vx * t.vx + t.vy * t.vy) * 10;
 
     } else {
         // New Track Logic
@@ -448,11 +460,6 @@ __global__ void DrawBoxesKernel(float* __restrict__ imageBatch,
 
     DetectionRaw det = detections[batchId * stride + boxId];
 
-    // if (isnan(det.x) || isnan(det.y) || isnan(det.w) || isnan(det.h) ||
-    //     det.w <= 16.0f || det.h <= 16.0f || det.w > width || det.h > height) {
-    //     return;
-    // }
-
     int planeSize = width * height;
     float* img = imageBatch + (batchId * planeSize * 3);
 
@@ -540,11 +547,6 @@ __global__ void DrawBoxesKernel(float* __restrict__ imageBatch,
     }
 }
 
-// struct IsDeadTrack {
-//     __host__ __device__
-//         bool operator()(const TrackState& t) { return t.age == -999; }
-// };
-
 } // anonymous namespace
 
 
@@ -561,6 +563,7 @@ CudaError TrackBatch(int batchIndex,
                      std::vector<int> &trackCountHost,
                      Block<int> &nextTrackId,
                      Block<int> &detectionMatches,
+                     TypedBlock<unsigned long long> &trackClaims,
                      int stride,
                      int maxTracks,
                      int activeClasses,
@@ -581,14 +584,8 @@ CudaError TrackBatch(int batchIndex,
                                                                                  trackCount.data());
     CUDA_CHECK_KERNEL(stream);
 
-    // Get Count for THIS batch (Async)
-    // std::vector<int> currentDetCounts;
-    // std::vector<int> currentTrackCounts;
-
-    // CUDA_TRY(countBuffer.to_vector(currentDetCounts, stream));
     CUDA_TRY(countBuffer.to_vector(countBufferHost, stream));
 
-    // CUDA_TRY(trackCount.to_vector(currentTrackCounts, stream));
     CUDA_TRY(trackCount.to_vector(trackCountHost, stream));
 
     // Clamp count to stride (capacity)
@@ -602,13 +599,13 @@ CudaError TrackBatch(int batchIndex,
         // Match (Pass the slice, not the whole buffer)
         KernelGrid gridMatch(currentDetCount);
         MatchDetectionsKernel<<<gridMatch.gsize(), gridMatch.bsize(), 0, stream>>>(
-            batchDets, currentDetCount, tracks.data(), currentTrackCount, detectionMatches.data()
+            batchDets, currentDetCount, tracks.data(), currentTrackCount, detectionMatches.data(), trackClaims.data()
         );
         CUDA_CHECK_KERNEL(stream);
         // Update
         UpdateTracksKernel<<<gridMatch.gsize(), gridMatch.bsize(), 0, stream>>>(
             batchDets, currentDetCount, detectionMatches.data(), tracks.data(), trackCount.data(),
-            maxTracks, nextTrackId.data(), activeClasses, alpha, imageWidth, imageHeight
+            maxTracks, nextTrackId.data(), trackClaims.data(), activeClasses, alpha, imageWidth, imageHeight
         );
         CUDA_CHECK_KERNEL(stream);
     }
@@ -636,11 +633,6 @@ CudaError TrackBatch(int batchIndex,
 
     return CudaError();
 }
-
-// struct IsAliveTrack {
-//     __host__ __device__
-//         bool operator()(const TrackState& t) const { return t.age != -999; }
-// };
 
 __global__ void CompactTracksKernel(const TrackState* __restrict__ src,
                                     TrackState* __restrict__ dst,
