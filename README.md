@@ -3,11 +3,14 @@
 ![Status](https://img.shields.io/badge/Status-Stable-green)
 ![Platform](https://img.shields.io/badge/Platform-Linux_x64_%7C_Jetson_Orin-blue)
 ![Language](https://img.shields.io/badge/Language-C%2B%2B17_%7C_CUDA-green)
+[![Published in Towards AI](https://img.shields.io/badge/Towards_AI-Architectural_Deep_Dive-blue?logo=medium)](https://pub.towardsai.net/zero-host-copy-inference-keeping-the-cpu-out-of-the-hot-path-in-a-c-cuda-pipeline-165-fps-6da07bfdea9d?source=friends_link&sk=da4215313628fd3ab292ccb39cb702f8)
 [![AI Evaluation](https://img.shields.io/badge/AI_Code_Analysis-Gemini_3.6_Flash-purple)](https://app.igkho-systems.dev/)
 
 **Author:** Igor Khozhanov
 
-**Contact:** khozhanov@gmail.com
+**Contact:** [khozhanov@gmail.com](mailto:khozhanov@gmail.com) | [LinkedIn](https://www.linkedin.com/in/igor-khozhanov-76964412b/) | Telegram: [@igkho_tg](https://t.me/igkho_tg)
+
+**Status:** Open to remote Senior C++/CUDA & Computer Vision B2B contracts (EU/Global invoicing ready)
 
 **Copyright:** © 2026 Igor Khozhanov. All Rights Reserved.
 
@@ -26,6 +29,7 @@
 This project serves as a comprehensive demonstration of a high-performance **Zero-Host-Copy** video inference pipeline, designed to minimize CPU-GPU bandwidth bottlenecks. The architecture ensures that data remains entirely on the VRAM from decoding through inference to post-processing. 
 
 The pipeline supports full end-to-end detection and tracking using TensorRT and ONNX backends, powered by mathematically verified custom CUDA kernels.
+> 📖 **Architectural Deep-Dive (Towards AI):** For a complete breakdown of the three-phase memory lifecycle, PCIe vs. Jetson UMA memory abstractions (`Block.h`), EGL-CUDA hardware interop, custom CUDA tracking kernels, and NVIDIA Nsight Systems traces, read the full article: **[Zero-Host-Copy Inference: Keeping the CPU Out of the Hot Path in a C++/CUDA Pipeline (165 FPS)](https://pub.towardsai.net/zero-host-copy-inference-keeping-the-cpu-out-of-the-hot-path-in-a-c-cuda-pipeline-165-fps-6da07bfdea9d?source=friends_link&sk=da4215313628fd3ab292ccb39cb702f8)**.
 
 * **Hardware-in-the-Loop CI/CD:** Fully automated multi-architecture Docker build and testing pipeline via GitHub Actions. Utilizes self-hosted RTX 3060 Ti (x64) and Jetson Orin Nano (ARM64) runners with persistent host-level TensorRT engine caching to accelerate GPU unit testing.
 
@@ -70,7 +74,7 @@ Note: Jetson currently requires passing a directory of images (`-i ./frames/`) i
 * CUDA Toolkit (12.x)
 * TensorRT 10.x+
 * **cuDNN 8.x/9.x**: Required at runtime if utilizing the ONNX Runtime CUDA Execution Provider. *(Ensure `libcudnn.so` is in your `LD_LIBRARY_PATH` or installed system-wide).*
-* **FFmpeg**: Required.  *(Linux x64 Users: Install via 'apt' or build from source with `--enable-shared.*
+* **FFmpeg**: Required.  *(Linux x64 Users: Install via 'apt' or build from source with `--enable-shared`).*
 
 ## Build & Run (PC Native - Linux x64)
 
@@ -221,7 +225,7 @@ docker run --rm --runtime=nvidia \
 
 ## 🚀 Performance Benchmarks
 
-Benchmarks performed on **NVIDIA RTX 3060 Ti** and on **NVIDIA Jetson Orin Nano**
+Benchmarks performed on **NVIDIA RTX 3060 Ti** and on **NVIDIA Jetson Orin Nano Super 8Gb (25W mode)**
 
 **Input:** 1440p Video Stream or directory of jpeg images.
 
@@ -234,14 +238,6 @@ To measure the raw overhead of the pipeline architecture (I/O latency), a pass-t
 | :--- | :--- | :--- | :--- |
 | **Video Stream (FFMpeg)** | **~300 - 470 FPS** | **~2.1 - 3.3 ms** | Hardware decoding limit. Scales heavily based on the codec used (H.264 vs H.265). |
 | **Image Directory (NVJpeg)** | **~430+ FPS** | **~1.38 ms** | Utilizes multi-threaded async decoding & double-buffering. |
-
-### 1. Infrastructure Ceiling (Stub Mode) - RTX 3060 Ti
-To measure the raw overhead of the pipeline architecture (I/O latency), a pass-through (Stub) detector is used.
-
-| Input Type | Throughput | Decode Latency | Notes |
-| :--- | :--- | :--- | :--- |
-| **Video Stream (FFMpeg)** | **~300 FPS** | **~3.3 ms** | Standard sequential hardware decoding limit. |
-| **Image Directory (NVJpeg)** | **~450 FPS** | **~1.38 ms** | Utilizes multi-threaded async decoding & double-buffering. |
 
 ### 2. Real-World Inference (TensorRT INT8 Mode) - RTX 3060 Ti
 Running **YOLOv8m** (Explicitly Quantized INT8) with full object tracking and NVJpeg output.
@@ -284,14 +280,15 @@ Both **TensorRT** (Highly Optimized) and **ONNX Runtime** (Generic Compatibility
 | **TensorRT (INT8)** | **~164.8** | **~3.36 ms** | **1.4x** | Maximum performance. **Recommended.** |
 | **TensorRT (FP16)** | **~118.1** | **~5.58 ms** | **1.0x (Ref)** | Baseline hardware acceleration. |
 | **ONNX Runtime** | **~38.4** | **~24.2 ms** | **0.33x** | Generic execution. Useful for testing new models. |
+> **Note on INT8 Accuracy:** Explicit INT8 quantization (Q/DQ via NVIDIA ModelOpt) delivers a **1.4x** inference speedup over FP16 while sacrificing only **0.007 mAP@50** (**0.862** in FP32 down to **0.855** in INT8). Full quantization and validation scripts are available in the **[CropAndWeedDetection repository](https://github.com/Igkho/CropAndWeedDetection)**.
 
-### 4. Edge Performance - Jetson Orin Nano 8GB
+### 4. Edge Performance - Jetson Orin Nano Super 8GB
 
 **Scenario:** 1440x1440 Input Resolution (Directory of JPEG frames).
 
 **Model:** YOLOv8 Medium (YOLOv8m) 1024x1024.
 
-*ONNX Runtime** is not supported.
+**ONNX Runtime** is not supported.
 
 | Metric | Result, FPS | Notes |
 | :--- | :--- | :--- |
@@ -299,6 +296,7 @@ Both **TensorRT** (Highly Optimized) and **ONNX Runtime** (Generic Compatibility
 | **TensorRT (FP16) + NVJpeg** | **~22.2** | Baseline hardware acceleration (CUDA NVJPEG). |
 | **TensorRT (INT8) + NVJpeg** | **~31.4** | Fast inference, with decode/encode tasks using  CUDA SMs. |
 | **TensorRT (INT8) + MMAPI** | **~38.0** | New Peak. I/O offloaded to dedicated ASICs. |
+> **Note:** Tested on an **NVIDIA Jetson Orin Nano Super 8GB** using the standard **25W** power profile (`nvpmodel -m 1`).
 
 ## 🧠 Automated AI Technical Evaluation
 
@@ -307,7 +305,7 @@ Reviewing candidate repositories is time-consuming. To streamline the evaluation
 This self-service tool automatically ingests the raw code from this project (along with my other primary repositories) and analyzes it using Google's Gemini 3.6 Flash in High-Thinking mode. The underlying prompt architecture forces the LLM to act as a highly critical Lead Systems Engineer, extracting explicitly verified skills, estimating architectural maturity, identifying potential blind spots for interview probes, and offering the final brief as a downloadable PDF report. 
 
 👉 **[Run the AI Code Analysis Here](https://app.igkho-systems.dev/)**
-> **Note:** The live demo is hosted on a VPS. Due to current ISP routing restrictions, connections from within Russia may experience timeouts and require a VPN. If you are unable to access the live site, you can run the analyzer locally. See the instructions in the **[TechProfileAI repository](https://github.com/Igkho/TechProfileAI)**.
+> **Note:** The live demo is hosted on a VPS. If the live VPS demo is unreachable from your network, you can run the analyzer locally. See the instructions in the **[TechProfileAI repository](https://github.com/Igkho/TechProfileAI)**.
 
 ## ⚖️ License
 
